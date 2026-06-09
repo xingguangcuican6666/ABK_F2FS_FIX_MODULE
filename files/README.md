@@ -14,6 +14,9 @@ files/
         `-- example.c
 ```
 
+This directory also ships `abk_storage_runtime_policy_module.zip`, the ordinary
+Magisk dependency bundled into flash artifacts for this module set.
+
 Example usage in `setup.sh`:
 
 ```bash

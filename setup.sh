@@ -10,38 +10,27 @@ fi
 
 # shellcheck disable=SC1091
 source "$MODULE_DIR/scripts/libabk.sh"
+# shellcheck disable=SC1091
+source "$MODULE_DIR/scripts/abk_storage_fix_suite.sh"
 
 abk_require_env KERNEL_ROOT DEFCONFIG CUSTOM_EXTERNAL_MODULE_STAGE
 
-abk_log "module: ${ABK_MODULE_NAME:-ABK external module}"
-abk_log "version: ${ABK_MODULE_VERSION:-unknown}"
+module_name="${ABK_MODULE_SET_NAME:-${ABK_MODULE_NAME:-ABK external module}}"
+module_version="${ABK_MODULE_SET_VERSION:-${ABK_MODULE_VERSION:-unknown}}"
+
+abk_log "module: $module_name"
+abk_log "version: $module_version"
 abk_log "stage: $CUSTOM_EXTERNAL_MODULE_STAGE"
 abk_log "config: ${CONFIG:-unknown}"
 abk_log "kernel root: $KERNEL_ROOT"
+if [ -n "${ABK_MODULE_CHILD_ID:-}" ]; then
+  abk_log "module-set child: ${ABK_MODULE_CHILD_ID}"
+fi
 
 case "$CUSTOM_EXTERNAL_MODULE_STAGE" in
-  after_patch)
-    # Source-tree changes usually belong here.
-    #
-    # Examples:
-    #   abk_apply_patch_dir "$MODULE_DIR/patches/common"
-    #   abk_copy_into_kernel "$MODULE_DIR/files/drivers/example" "common/drivers/example"
-    #
-    # The template is intentionally a no-op.
-    abk_log "after_patch: no changes configured"
+  after_patch|before_build)
+    abk_storage_fix_suite_apply_selected
     ;;
-
-  before_build)
-    # Final defconfig or generated-file changes usually belong here.
-    #
-    # Examples:
-    #   abk_enable_config CONFIG_EXAMPLE_FEATURE
-    #   abk_disable_config CONFIG_UNUSED_FEATURE
-    #
-    # The template is intentionally a no-op.
-    abk_log "before_build: no changes configured"
-    ;;
-
   *)
     abk_die "unsupported CUSTOM_EXTERNAL_MODULE_STAGE: $CUSTOM_EXTERNAL_MODULE_STAGE"
     ;;

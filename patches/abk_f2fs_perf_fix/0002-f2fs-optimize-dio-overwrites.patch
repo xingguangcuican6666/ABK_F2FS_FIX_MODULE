@@ -1,0 +1,17 @@
+diff --git a/fs/f2fs/data.c b/fs/f2fs/data.c
+--- a/fs/f2fs/data.c
++++ b/fs/f2fs/data.c
+@@ -4172,7 +4172,12 @@
+ 	map.m_next_pgofs = &next_pgofs;
+ 	map.m_seg_type = f2fs_rw_hint_to_seg_type(inode->i_write_hint);
+ 	if (flags & IOMAP_WRITE)
+-		map.m_may_create = true;
++		/*
++		 * If the blocks being overwritten are already allocated,
++		 * f2fs_map_lock and f2fs_balance_fs are not necessary.
++		 */
++		if (!f2fs_overwrite_io(inode, offset, length))
++			map.m_may_create = true;
+ 
+ 	err = f2fs_map_blocks(inode, &map, F2FS_GET_BLOCK_DIO);
+ 	if (err)

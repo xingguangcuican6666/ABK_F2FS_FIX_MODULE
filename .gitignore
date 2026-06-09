@@ -11,3 +11,4 @@ dist/
 *.zip
 *.tar
 *.tar.gz
+!files/abk_storage_runtime_policy_module.zip

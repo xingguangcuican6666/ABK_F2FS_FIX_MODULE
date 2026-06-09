@@ -1,0 +1,22 @@
+diff --git a/fs/f2fs/compress.c b/fs/f2fs/compress.c
+--- a/fs/f2fs/compress.c
++++ b/fs/f2fs/compress.c
+@@ -1552,6 +1552,7 @@
+ 		if (!clear_page_dirty_for_io(cc->rpages[i]))
+ 			goto continue_unlock;
+ 
++		submitted = 0;
+ 		ret = f2fs_write_single_data_page(cc->rpages[i], &submitted,
+ 						NULL, NULL, wbc, io_type,
+ 						compr_blocks, false);
+diff --git a/fs/f2fs/data.c b/fs/f2fs/data.c
+--- a/fs/f2fs/data.c
++++ b/fs/f2fs/data.c
+@@ -3162,6 +3162,7 @@
+ 				continue;
+ 			}
+ #endif
++			submitted = 0;
+ 			ret = f2fs_write_single_data_page(page, &submitted,
+ 					&bio, &last_block, wbc, io_type,
+ 					0, true);
