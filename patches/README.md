@@ -1,21 +1,9 @@
-# patches/
+# Patches
 
-Place `git format-patch` or `git diff` patches here.
+These patches are generated from:
 
-Recommended layout:
+- `android14-6.1-2024-01_r24`
+- `android14-6.1-2025-01_r29`
 
-```text
-patches/
-|-- common/
-|   `-- 0001-example.patch
-|-- 5.10/
-|   `-- 0001-example-5.10.patch
-`-- 6.x/
-    `-- 0001-example-6.x.patch
-```
-
-Example usage in `setup.sh`:
-
-```bash
-abk_apply_patch_dir "$MODULE_DIR/patches/common"
-```
+They are stored as forward diffs from 2024-01 to 2025-01, and the module applies
+them with `git apply --reverse`.

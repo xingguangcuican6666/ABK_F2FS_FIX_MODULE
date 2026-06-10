@@ -1,67 +1,46 @@
-# ABK F2FS / Storage Fix Suite
+# ABK F2FS / Storage Rollback Suite
 
-ABK module-set repository for the post-FIDO precompiled storage patch modules
-used in the local `.local-build/env.sh` flow.
+This ABK external module set rolls back the Android 14 / Linux 6.1 storage
+paths that were validated locally for the 6.1.118 build:
 
-## Included children
+- `drivers/ufs`
+- `block`
+- `fs/f2fs`
+- minimal compatibility fixups required after the partial rollback
 
-- `ABK F2FS Perf Fix`
-- `ABK F2FS LowDepth Fix`
-- `ABK UFS PM Fix`
-- `ABK dm-default-key Fix`
+Rollback source range:
 
-`ABK F2FS LowDepth Fix` uses a scripted semantic edit of
-`fs/f2fs/super.c::default_options()` rather than a raw patch so it survives
-small Android common `6.1.x` source drift and earlier `super.c` edits.
+- target behavior: `android14-6.1-2024-01_r24`
+- current build base: `android14-6.1-2025-01_r29`
 
-`ABK UFS PM Fix` uses a scripted semantic edit of
-`drivers/ufs/core/ufshcd.c` so it can handle both the older unconditional PM
-defaults and the newer guarded `rpm_lvl` / `spm_lvl` initialization found in
-later Android common `6.1.x` tags.
+The module is intended for `after_patch` only. If `ABK_MODULE_CHILD_ID` is not
+set, all children are applied in this order:
 
-The app reads the child list from `module.conf` and expands user selections
-into flat `set:https://github.com/xingguangcuican6666/ABK_F2FS_FIX_MODULE#child_id;stage`
-workflow inputs.
+1. `storage_ufs_rollback`
+2. `storage_block_rollback`
+3. `storage_f2fs_rollback`
+4. `storage_common_fixups`
 
-## Runtime Magisk dependency
+## Integration
 
-All children require the same ordinary Magisk module:
-
-- `ABK Storage Runtime Policy`
-- Download URL:
-  `https://raw.githubusercontent.com/xingguangcuican6666/ABK_F2FS_FIX_MODULE/main/files/abk_storage_runtime_policy_module.zip`
-
-When users flash a boot image or AnyKernel3 bundle produced from a build that
-used one of these children, ABK installs that Magisk module first and only then
-continues with flashing.
-
-## Repository layout
-
-```text
-.
-|-- module.conf
-|-- setup.sh
-|-- scripts/
-|   |-- libabk.sh
-|   `-- abk_storage_fix_suite.sh
-|-- patches/
-|   |-- abk_f2fs_perf_fix/
-|   `-- abk_dm_default_key_fix/
-`-- files/
-    `-- abk_storage_runtime_policy_module.zip
+```bash
+export USE_CUSTOM_EXTERNAL_MODULES="true"
+export CUSTOM_EXTERNAL_MODULES="https://github.com/xingguangcuican6666/ABK_F2FS_FIX_MODULE.git;after_patch"
 ```
 
-## Behavior
+For a local checkout:
 
-`setup.sh` supports two modes:
+```bash
+export USE_CUSTOM_EXTERNAL_MODULES="true"
+export CUSTOM_EXTERNAL_MODULES="/run/media/xingguangcuican/Project/testa/ABK_F2FS_FIX_MODULE;after_patch"
+```
 
-- if `ABK_MODULE_CHILD_ID` is set, only that child patchset is applied
-- if it is empty, all four child patchsets are applied in order
+## Magisk Runtime Policy
 
-That keeps the repository usable both as an app-driven module set and as a
-manual “apply all storage fixes” module.
+The existing Magisk-side dependency is preserved:
 
-Patch-driven children continue to read from `patches/`. The lowdepth child is
-implemented directly in `scripts/abk_storage_fix_suite.sh`
-so it can validate and rewrite only the two intended defaults. The UFS PM child
-uses the same scripted approach for `ufshcd.c`.
+- name: `ABK Storage Runtime Policy`
+- file: `files/abk_storage_runtime_policy_module.zip`
+
+The ABK metadata exposes the Magisk zip URL for each child entry so frontends
+can keep the dependency relationship.
