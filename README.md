@@ -10,6 +10,10 @@ used in the local `.local-build/env.sh` flow.
 - `ABK UFS PM Fix`
 - `ABK dm-default-key Fix`
 
+`ABK F2FS LowDepth Fix` uses a scripted semantic edit of
+`fs/f2fs/super.c::default_options()` rather than a raw patch so it survives
+small Android common `6.1.x` source drift and earlier `super.c` edits.
+
 The app reads the child list from `module.conf` and expands user selections
 into flat `set:https://github.com/xingguangcuican6666/ABK_F2FS_FIX_MODULE#child_id;stage`
 workflow inputs.
@@ -37,7 +41,6 @@ continues with flashing.
 |   `-- abk_storage_fix_suite.sh
 |-- patches/
 |   |-- abk_f2fs_perf_fix/
-|   |-- abk_f2fs_lowdepth_fix/
 |   |-- abk_ufs_pm_fix/
 |   `-- abk_dm_default_key_fix/
 `-- files/
@@ -53,3 +56,7 @@ continues with flashing.
 
 That keeps the repository usable both as an app-driven module set and as a
 manual “apply all storage fixes” module.
+
+Patch-driven children continue to read from `patches/`. The lowdepth child is
+implemented directly in `scripts/abk_storage_fix_suite.sh`
+so it can validate and rewrite only the two intended defaults.

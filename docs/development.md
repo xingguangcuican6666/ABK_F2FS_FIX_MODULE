@@ -182,6 +182,14 @@ if abk_stage_is after_patch; then
 fi
 ```
 
+Use semantic source edits when a raw patch would be too brittle:
+
+```bash
+source_file="$(abk_common_dir)/fs/f2fs/super.c"
+abk_require_file "$source_file"
+# Validate a stable function-level anchor, then rewrite only the target lines.
+```
+
 ## Pre-commit Checks
 
 At minimum, run:
@@ -201,6 +209,8 @@ If your module includes patches, check the ABK build log and confirm:
 
 - Do not assume one fixed kernel sublevel. Read `CONFIG` or use
   `abk_kernel_version`.
+- Prefer function-anchored semantic edits over raw patches when you only need
+  to rewrite a few stable defaults and upstream context around them drifts.
 - Handle Android 12/13 5.x and Android 14+ Bazel/Kleaf differences explicitly.
 - Do not hardcode paths such as `$GITHUB_WORKSPACE/android15-6.6-118`; use
   `$KERNEL_ROOT`.
