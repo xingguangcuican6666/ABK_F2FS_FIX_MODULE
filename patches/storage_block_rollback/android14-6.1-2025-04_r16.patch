@@ -1,5 +1,5 @@
 diff --git a/block/bdev.c b/block/bdev.c
-index 87d66d1..ef60d99 100644
+index 87d66d16b..ef60d9912 100644
 --- a/block/bdev.c
 +++ b/block/bdev.c
 @@ -512,6 +512,8 @@ struct block_device *bdev_alloc(struct gendisk *disk, u8 partno)
@@ -12,7 +12,7 @@ index 87d66d1..ef60d99 100644
  	bdev->bd_inode->i_rdev = dev;
  	bdev->bd_inode->i_ino = dev;
 diff --git a/block/bfq-iosched.c b/block/bfq-iosched.c
-index 52eb79d..8e79778 100644
+index 52eb79d60..f75945764 100644
 --- a/block/bfq-iosched.c
 +++ b/block/bfq-iosched.c
 @@ -2889,8 +2889,12 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
@@ -125,7 +125,7 @@ index 52eb79d..8e79778 100644
  		bfqq->pid = current->pid;
  		bfq_clear_bfqq_coop(bfqq);
  		bfq_clear_bfqq_split_coop(bfqq);
-@@ -6720,6 +6721,31 @@ static void bfq_prepare_request(struct request *rq)
+@@ -6720,6 +6721,39 @@ static void bfq_prepare_request(struct request *rq)
  	rq->elv.priv[0] = rq->elv.priv[1] = NULL;
  }
  
@@ -141,15 +141,23 @@ index 52eb79d..8e79778 100644
 +		if (new_bfqq == waker_bfqq) {
 +			/*
 +			 * If waker_bfqq is in the merge chain, and current
-+			 * is the only procress.
++			 * is the only process, waker_bfqq can be freed.
 +			 */
 +			if (bfqq_process_refs(waker_bfqq) == 1)
 +				return NULL;
-+			break;
++
++			return waker_bfqq;
 +		}
 +
 +		new_bfqq = new_bfqq->new_bfqq;
 +	}
++
++	/*
++	 * If waker_bfqq is not in the merge chain, and it's procress reference
++	 * is 0, waker_bfqq can be freed.
++	 */
++	if (bfqq_process_refs(waker_bfqq) == 0)
++		return NULL;
 +
 +	return waker_bfqq;
 +}
@@ -157,7 +165,7 @@ index 52eb79d..8e79778 100644
  /*
   * If needed, init rq, allocate bfq data structures associated with
   * rq, and increment reference counters in the destination bfq_queue
-@@ -6780,7 +6806,7 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
+@@ -6780,7 +6814,7 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
  		/* If the queue was seeky for too long, break it apart. */
  		if (bfq_bfqq_coop(bfqq) && bfq_bfqq_split_coop(bfqq) &&
  			!bic->stably_merged) {
@@ -166,7 +174,7 @@ index 52eb79d..8e79778 100644
  
  			/* Update bic before losing reference to bfqq */
  			if (bfq_bfqq_in_large_burst(bfqq))
-@@ -6799,7 +6825,7 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
+@@ -6799,7 +6833,7 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
  				bfqq_already_existing = true;
  
  			if (!bfqq_already_existing) {
@@ -175,7 +183,7 @@ index 52eb79d..8e79778 100644
  				bfqq->tentative_waker_bfqq = NULL;
  
  				/*
-@@ -6809,7 +6835,7 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
+@@ -6809,7 +6843,7 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
  				 * woken_list of the waker. See
  				 * bfq_check_waker for details.
  				 */
@@ -184,7 +192,7 @@ index 52eb79d..8e79778 100644
  					hlist_add_head(&bfqq->woken_list_node,
  						       &bfqq->waker_bfqq->woken_list);
  			}
-@@ -6831,7 +6857,8 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
+@@ -6831,7 +6865,8 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
  	 * addition, if the queue has also just been split, we have to
  	 * resume its state.
  	 */
@@ -195,7 +203,7 @@ index 52eb79d..8e79778 100644
  		if (split) {
  			/*
 diff --git a/block/bio-integrity.c b/block/bio-integrity.c
-index 4533eb4..adbc004 100644
+index 4533eb491..adbc00449 100644
 --- a/block/bio-integrity.c
 +++ b/block/bio-integrity.c
 @@ -199,8 +199,7 @@ bool bio_integrity_prep(struct bio *bio)
@@ -258,7 +266,7 @@ index 4533eb4..adbc004 100644
  	return false;
  
 diff --git a/block/bio.c b/block/bio.c
-index 311f3b3..43d7da5 100644
+index 311f3b345..43d7da5e9 100644
 --- a/block/bio.c
 +++ b/block/bio.c
 @@ -930,7 +930,7 @@ static bool bio_try_merge_hw_seg(struct request_queue *q, struct bio *bio,
@@ -331,7 +339,7 @@ index 311f3b3..43d7da5 100644
  	}
  
 diff --git a/block/blk-cgroup.c b/block/blk-cgroup.c
-index 60f366f..1b7fd1f 100644
+index 60f366f98..cced5a2d5 100644
 --- a/block/blk-cgroup.c
 +++ b/block/blk-cgroup.c
 @@ -462,6 +462,7 @@ static void blkg_destroy_all(struct gendisk *disk)
@@ -361,8 +369,32 @@ index 60f366f..1b7fd1f 100644
  	q->root_blkg = NULL;
  	spin_unlock_irq(&q->queue_lock);
  }
+@@ -911,6 +924,7 @@ static void blkcg_fill_root_iostats(void)
+ 		blkg_iostat_set(&blkg->iostat.cur, &tmp);
+ 		u64_stats_update_end_irqrestore(&blkg->iostat.sync, flags);
+ 	}
++	class_dev_iter_exit(&iter);
+ }
+ 
+ static void blkcg_print_one_stat(struct blkcg_gq *blkg, struct seq_file *s)
+@@ -1097,10 +1111,14 @@ void blkcg_unpin_online(struct cgroup_subsys_state *blkcg_css)
+ 	struct blkcg *blkcg = css_to_blkcg(blkcg_css);
+ 
+ 	do {
++		struct blkcg *parent;
++
+ 		if (!refcount_dec_and_test(&blkcg->online_pin))
+ 			break;
++
++		parent = blkcg_parent(blkcg);
+ 		blkcg_destroy_blkgs(blkcg);
+-		blkcg = blkcg_parent(blkcg);
++		blkcg = parent;
+ 	} while (blkcg);
+ }
+ 
 diff --git a/block/blk-core.c b/block/blk-core.c
-index 803ce92..0ede9a9 100644
+index 803ce922d..0ede9a9f7 100644
 --- a/block/blk-core.c
 +++ b/block/blk-core.c
 @@ -45,10 +45,14 @@
@@ -457,7 +489,7 @@ index 803ce92..0ede9a9 100644
  	return 0;
  }
 diff --git a/block/blk-integrity.c b/block/blk-integrity.c
-index 69eed26..5276c55 100644
+index 69eed260a..5276c556a 100644
 --- a/block/blk-integrity.c
 +++ b/block/blk-integrity.c
 @@ -212,61 +212,44 @@ bool blk_integrity_merge_bio(struct request_queue *q, struct request *req,
@@ -696,10 +728,26 @@ index 69eed26..5276c55 100644
 -	kobject_put(&disk->integrity_kobj);
 -}
 diff --git a/block/blk-iocost.c b/block/blk-iocost.c
-index 7dd6a33..772e909 100644
+index 7dd6a33e1..e270e64ba 100644
 --- a/block/blk-iocost.c
 +++ b/block/blk-iocost.c
-@@ -1331,16 +1331,24 @@ static bool iocg_kick_delay(struct ioc_gq *iocg, struct ioc_now *now)
+@@ -1082,7 +1082,14 @@ static void __propagate_weights(struct ioc_gq *iocg, u32 active, u32 inuse,
+ 		inuse = DIV64_U64_ROUND_UP(active * iocg->child_inuse_sum,
+ 					   iocg->child_active_sum);
+ 	} else {
+-		inuse = clamp_t(u32, inuse, 1, active);
++		/*
++		 * It may be tempting to turn this into a clamp expression with
++		 * a lower limit of 1 but active may be 0, which cannot be used
++		 * as an upper limit in that situation. This expression allows
++		 * active to clamp inuse unless it is 0, in which case inuse
++		 * becomes 1.
++		 */
++		inuse = min(inuse, active) ?: 1;
+ 	}
+ 
+ 	iocg->last_inuse = iocg->inuse;
+@@ -1331,16 +1338,24 @@ static bool iocg_kick_delay(struct ioc_gq *iocg, struct ioc_now *now)
  {
  	struct ioc *ioc = iocg->ioc;
  	struct blkcg_gq *blkg = iocg_to_blkg(iocg);
@@ -727,7 +775,7 @@ index 7dd6a33..772e909 100644
  	else
  		delay = 0;
  
-@@ -2049,7 +2057,7 @@ static void ioc_forgive_debts(struct ioc *ioc, u64 usage_us_sum, int nr_debtors,
+@@ -2049,7 +2064,7 @@ static void ioc_forgive_debts(struct ioc *ioc, u64 usage_us_sum, int nr_debtors,
  			      struct ioc_now *now)
  {
  	struct ioc_gq *iocg;
@@ -736,7 +784,7 @@ index 7dd6a33..772e909 100644
  
  	/* if no debtor, reset the cycle */
  	if (!nr_debtors) {
-@@ -2111,10 +2119,12 @@ static void ioc_forgive_debts(struct ioc *ioc, u64 usage_us_sum, int nr_debtors,
+@@ -2111,10 +2126,12 @@ static void ioc_forgive_debts(struct ioc *ioc, u64 usage_us_sum, int nr_debtors,
  		old_debt = iocg->abs_vdebt;
  		old_delay = iocg->delay;
  
@@ -752,7 +800,7 @@ index 7dd6a33..772e909 100644
  		iocg_kick_waitq(iocg, true, now);
  
 diff --git a/block/blk-map.c b/block/blk-map.c
-index 66da9e2..0f628e6 100644
+index 66da9e2b1..0f628e60f 100644
 --- a/block/blk-map.c
 +++ b/block/blk-map.c
 @@ -203,12 +203,19 @@ static int bio_copy_user_iov(struct request *rq, struct rq_map_data *map_data,
@@ -799,10 +847,25 @@ index 66da9e2..0f628e6 100644
  		nsegs++;
  		bytes += bv->bv_len;
 diff --git a/block/blk-merge.c b/block/blk-merge.c
-index cc7f6a4..8b82e47 100644
+index cc7f6a4a2..36568533f 100644
 --- a/block/blk-merge.c
 +++ b/block/blk-merge.c
-@@ -285,7 +285,8 @@ static struct bio *bio_split_rw(struct bio *bio, struct queue_limits *lim,
+@@ -247,6 +247,14 @@ static bool bvec_split_segs(struct queue_limits *lim, const struct bio_vec *bv,
+ 	return len > 0 || bv->bv_len > max_len;
+ }
+ 
++static unsigned int bio_split_alignment(struct bio *bio,
++		const struct queue_limits *lim)
++{
++	if (op_is_write(bio_op(bio)) && lim->zone_write_granularity)
++		return lim->zone_write_granularity;
++	return lim->logical_block_size;
++}
++
+ /**
+  * bio_split_rw - split a bio in two bios
+  * @bio:  [in] bio to be split
+@@ -285,7 +293,8 @@ static struct bio *bio_split_rw(struct bio *bio, struct queue_limits *lim,
  		if (nsegs < lim->max_segments &&
  		    bytes + bv.bv_len <= max_bytes &&
  		    bv.bv_offset + bv.bv_len <= PAGE_SIZE) {
@@ -812,7 +875,16 @@ index cc7f6a4..8b82e47 100644
  			bytes += bv.bv_len;
  		} else {
  			if (bvec_split_segs(lim, &bv, &nsegs, &bytes,
-@@ -533,7 +534,10 @@ static int __blk_bios_map_sg(struct request_queue *q, struct bio *bio,
+@@ -317,7 +326,7 @@ split:
+ 	 * split size so that each bio is properly block size aligned, even if
+ 	 * we do not use the full hardware limits.
+ 	 */
+-	bytes = ALIGN_DOWN(bytes, lim->logical_block_size);
++	bytes = ALIGN_DOWN(bytes, bio_split_alignment(bio, lim));
+ 
+ 	/*
+ 	 * Bio splitting may cause subtle trouble such as hang when doing sync
+@@ -533,7 +542,10 @@ static int __blk_bios_map_sg(struct request_queue *q, struct bio *bio,
  			    __blk_segment_map_sg_merge(q, &bvec, &bvprv, sg))
  				goto next_bvec;
  
@@ -824,7 +896,7 @@ index cc7f6a4..8b82e47 100644
  				nsegs += __blk_bvec_map_sg(bvec, sglist, sg);
  			else
  				nsegs += blk_bvec_map_sg(q, &bvec, sglist, sg);
-@@ -779,6 +783,8 @@ static void blk_account_io_merge_request(struct request *req)
+@@ -779,6 +791,8 @@ static void blk_account_io_merge_request(struct request *req)
  	if (blk_do_io_stat(req)) {
  		part_stat_lock();
  		part_stat_inc(req->part, merges[op_stat_group(req_op(req))]);
@@ -834,7 +906,7 @@ index cc7f6a4..8b82e47 100644
  	}
  }
 diff --git a/block/blk-mq-debugfs.c b/block/blk-mq-debugfs.c
-index bd94234..786992a 100644
+index bd942341b..786992aaa 100644
 --- a/block/blk-mq-debugfs.c
 +++ b/block/blk-mq-debugfs.c
 @@ -874,3 +874,12 @@ void blk_mq_debugfs_unregister_sched_hctx(struct blk_mq_hw_ctx *hctx)
@@ -851,7 +923,7 @@ index bd94234..786992a 100644
 +			    NULL, &blk_sub_page_limit_queues_fops);
 +}
 diff --git a/block/blk-mq-debugfs.h b/block/blk-mq-debugfs.h
-index 9c7d4b6..7942119 100644
+index 9c7d4b611..794211905 100644
 --- a/block/blk-mq-debugfs.h
 +++ b/block/blk-mq-debugfs.h
 @@ -17,6 +17,8 @@ struct blk_mq_debugfs_attr {
@@ -875,7 +947,7 @@ index 9c7d4b6..7942119 100644
  {
  }
 diff --git a/block/blk-mq.c b/block/blk-mq.c
-index c425c31..81b9966 100644
+index c425c31e5..2fe46b154 100644
 --- a/block/blk-mq.c
 +++ b/block/blk-mq.c
 @@ -42,7 +42,6 @@
@@ -1109,7 +1181,20 @@ index c425c31..81b9966 100644
  	/*
  	 * It's possible that a tag was freed in the window between the
  	 * allocation failure and adding the hardware queue to the wait
-@@ -2853,11 +2899,8 @@ static struct request *blk_mq_get_new_requests(struct request_queue *q,
+@@ -2428,6 +2474,12 @@ void blk_mq_start_stopped_hw_queue(struct blk_mq_hw_ctx *hctx, bool async)
+ 		return;
+ 
+ 	clear_bit(BLK_MQ_S_STOPPED, &hctx->state);
++	/*
++	 * Pairs with the smp_mb() in blk_mq_hctx_stopped() to order the
++	 * clearing of BLK_MQ_S_STOPPED above and the checking of dispatch
++	 * list in the subsequent routine.
++	 */
++	smp_mb__after_atomic();
+ 	blk_mq_run_hw_queue(hctx, async);
+ }
+ EXPORT_SYMBOL_GPL(blk_mq_start_stopped_hw_queue);
+@@ -2853,11 +2905,8 @@ static struct request *blk_mq_get_new_requests(struct request_queue *q,
  	};
  	struct request *rq;
  
@@ -1122,7 +1207,7 @@ index c425c31..81b9966 100644
  
  	rq_qos_throttle(q, bio);
  
-@@ -2873,35 +2916,23 @@ static struct request *blk_mq_get_new_requests(struct request_queue *q,
+@@ -2873,35 +2922,23 @@ static struct request *blk_mq_get_new_requests(struct request_queue *q,
  	rq_qos_cleanup(q, bio);
  	if (bio->bi_opf & REQ_NOWAIT)
  		bio_wouldblock_error(bio);
@@ -1139,21 +1224,21 @@ index c425c31..81b9966 100644
  {
 -	struct request *rq;
 -	enum hctx_type type, hctx_type;
-+	enum hctx_type type = blk_mq_get_hctx_type(bio->bi_opf);
-+	enum hctx_type hctx_type = rq->mq_hctx->type;
- 
+-
 -	if (!plug)
 -		return NULL;
 -	rq = rq_list_peek(&plug->cached_rq);
 -	if (!rq || rq->q != q)
 -		return NULL;
-+	WARN_ON_ONCE(rq_list_peek(&plug->cached_rq) != rq);
++	enum hctx_type type = blk_mq_get_hctx_type(bio->bi_opf);
++	enum hctx_type hctx_type = rq->mq_hctx->type;
  
 -	if (blk_mq_attempt_bio_merge(q, *bio, nsegs)) {
 -		*bio = NULL;
 -		return NULL;
 -	}
--
++	WARN_ON_ONCE(rq_list_peek(&plug->cached_rq) != rq);
+ 
 -	type = blk_mq_get_hctx_type((*bio)->bi_opf);
 -	hctx_type = rq->mq_hctx->type;
  	if (type != hctx_type &&
@@ -1167,7 +1252,7 @@ index c425c31..81b9966 100644
  
  	/*
  	 * If any qos ->throttle() end up blocking, we will have flushed the
-@@ -2909,19 +2940,11 @@ static inline struct request *blk_mq_get_cached_request(struct request_queue *q,
+@@ -2909,19 +2946,11 @@ static inline struct request *blk_mq_get_cached_request(struct request_queue *q,
  	 * before we throttle.
  	 */
  	plug->cached_rq = rq_list_next(rq);
@@ -1190,7 +1275,7 @@ index c425c31..81b9966 100644
  }
  
  /**
-@@ -2942,31 +2965,54 @@ void blk_mq_submit_bio(struct bio *bio)
+@@ -2942,31 +2971,54 @@ void blk_mq_submit_bio(struct bio *bio)
  	struct request_queue *q = bdev_get_queue(bio->bi_bdev);
  	struct blk_plug *plug = blk_mq_plug(bio);
  	const int is_sync = op_is_sync(bio->bi_opf);
@@ -1220,13 +1305,13 @@ index c425c31..81b9966 100644
 +		if (!bio_integrity_prep(bio))
 +			return;
 +		if (blk_mq_attempt_bio_merge(q, bio, nr_segs))
-+			return;
+ 			return;
 +		if (blk_mq_can_use_cached_rq(rq, plug, bio))
 +			goto done;
 +		percpu_ref_get(&q->q_usage_counter);
 +	} else {
 +		if (unlikely(bio_queue_enter(bio)))
- 			return;
++			return;
 +		if (unlikely(bio_may_exceed_limits(bio, &q->limits))) {
 +			bio = __bio_split_to_limits(bio, &q->limits, &nr_segs);
 +			if (!bio)
@@ -1260,8 +1345,72 @@ index c425c31..81b9966 100644
  	trace_block_getrq(bio);
  
  	rq_qos_track(q, rq, bio);
+@@ -3622,16 +3674,11 @@ static int blk_mq_init_hctx(struct request_queue *q,
+ {
+ 	hctx->queue_num = hctx_idx;
+ 
+-	if (!(hctx->flags & BLK_MQ_F_STACKING))
+-		cpuhp_state_add_instance_nocalls(CPUHP_AP_BLK_MQ_ONLINE,
+-				&hctx->cpuhp_online);
+-	cpuhp_state_add_instance_nocalls(CPUHP_BLK_MQ_DEAD, &hctx->cpuhp_dead);
+-
+ 	hctx->tags = set->tags[hctx_idx];
+ 
+ 	if (set->ops->init_hctx &&
+ 	    set->ops->init_hctx(hctx, set->driver_data, hctx_idx))
+-		goto unregister_cpu_notifier;
++		goto fail;
+ 
+ 	if (blk_mq_init_request(set, hctx->fq->flush_rq, hctx_idx,
+ 				hctx->numa_node))
+@@ -3640,6 +3687,11 @@ static int blk_mq_init_hctx(struct request_queue *q,
+ 	if (xa_insert(&q->hctx_table, hctx_idx, hctx, GFP_KERNEL))
+ 		goto exit_flush_rq;
+ 
++	if (!(hctx->flags & BLK_MQ_F_STACKING))
++		cpuhp_state_add_instance_nocalls(CPUHP_AP_BLK_MQ_ONLINE,
++				&hctx->cpuhp_online);
++	cpuhp_state_add_instance_nocalls(CPUHP_BLK_MQ_DEAD, &hctx->cpuhp_dead);
++
+ 	return 0;
+ 
+  exit_flush_rq:
+@@ -3648,8 +3700,7 @@ static int blk_mq_init_hctx(struct request_queue *q,
+  exit_hctx:
+ 	if (set->ops->exit_hctx)
+ 		set->ops->exit_hctx(hctx, hctx_idx);
+- unregister_cpu_notifier:
+-	blk_mq_remove_cpuhp(hctx);
++ fail:
+ 	return -1;
+ }
+ 
+diff --git a/block/blk-mq.h b/block/blk-mq.h
+index 908f83093..dbe32c883 100644
+--- a/block/blk-mq.h
++++ b/block/blk-mq.h
+@@ -178,6 +178,19 @@ static inline struct blk_mq_tags *blk_mq_tags_from_data(struct blk_mq_alloc_data
+ 
+ static inline bool blk_mq_hctx_stopped(struct blk_mq_hw_ctx *hctx)
+ {
++	/* Fast path: hardware queue is not stopped most of the time. */
++	if (likely(!test_bit(BLK_MQ_S_STOPPED, &hctx->state)))
++		return false;
++
++	/*
++	 * This barrier is used to order adding of dispatch list before and
++	 * the test of BLK_MQ_S_STOPPED below. Pairs with the memory barrier
++	 * in blk_mq_start_stopped_hw_queue() so that dispatch code could
++	 * either see BLK_MQ_S_STOPPED is cleared or dispatch list is not
++	 * empty to avoid missing dispatching requests.
++	 */
++	smp_mb();
++
+ 	return test_bit(BLK_MQ_S_STOPPED, &hctx->state);
+ }
+ 
 diff --git a/block/blk-rq-qos.c b/block/blk-rq-qos.c
-index 88f0fe7..a319311 100644
+index 88f0fe7dc..a319311d1 100644
 --- a/block/blk-rq-qos.c
 +++ b/block/blk-rq-qos.c
 @@ -219,8 +219,8 @@ static int rq_qos_wake_function(struct wait_queue_entry *curr,
@@ -1275,7 +1424,7 @@ index 88f0fe7..a319311 100644
  }
  
 diff --git a/block/blk-settings.c b/block/blk-settings.c
-index 86ff375..4b7777f 100644
+index 86ff375c0..4b7777fd1 100644
 --- a/block/blk-settings.c
 +++ b/block/blk-settings.c
 @@ -2,6 +2,9 @@
@@ -1451,7 +1600,7 @@ index 86ff375..4b7777f 100644
  
  	q->limits.seg_boundary_mask = mask;
 diff --git a/block/blk-stat.c b/block/blk-stat.c
-index da9407b..41be89e 100644
+index da9407b7d..41be89eca 100644
 --- a/block/blk-stat.c
 +++ b/block/blk-stat.c
 @@ -28,7 +28,7 @@ void blk_rq_stat_init(struct blk_rq_stat *stat)
@@ -1464,7 +1613,7 @@ index da9407b..41be89e 100644
  
  	dst->min = min(dst->min, src->min);
 diff --git a/block/blk-sysfs.c b/block/blk-sysfs.c
-index 568a63c..b2bb190 100644
+index 568a63c24..3231b2632 100644
 --- a/block/blk-sysfs.c
 +++ b/block/blk-sysfs.c
 @@ -770,6 +770,8 @@ static void blk_release_queue(struct kobject *kobj)
@@ -1476,8 +1625,21 @@ index 568a63c..b2bb190 100644
  	if (queue_is_mq(q))
  		blk_mq_release(q);
  
+@@ -858,10 +860,8 @@ unlock:
+ 	 * faster to shut down and is made fully functional here as
+ 	 * request_queues for non-existent devices never get registered.
+ 	 */
+-	if (!blk_queue_init_done(q)) {
+-		blk_queue_flag_set(QUEUE_FLAG_INIT_DONE, q);
+-		percpu_ref_switch_to_percpu(&q->q_usage_counter);
+-	}
++	blk_queue_flag_set(QUEUE_FLAG_INIT_DONE, q);
++	percpu_ref_switch_to_percpu(&q->q_usage_counter);
+ 
+ 	return ret;
+ 
 diff --git a/block/blk-throttle.c b/block/blk-throttle.c
-index 1007f80..62a3f62 100644
+index 1007f8027..62a3f6231 100644
 --- a/block/blk-throttle.c
 +++ b/block/blk-throttle.c
 @@ -723,6 +723,12 @@ static unsigned int calculate_io_allowed(u32 iops_limit,
@@ -1510,7 +1672,7 @@ index 1007f80..62a3f62 100644
  	/*
  	 * We're already holding queue_lock and know @tg is valid.  Let's
 diff --git a/block/blk.h b/block/blk.h
-index a186ea2..4c0f07f 100644
+index a186ea20f..4c0f07f37 100644
 --- a/block/blk.h
 +++ b/block/blk.h
 @@ -13,6 +13,7 @@ struct elevator_type;
@@ -1614,7 +1776,7 @@ index a186ea2..4c0f07f 100644
  static inline void req_set_nomerge(struct request_queue *q, struct request *req)
  {
 diff --git a/block/elevator.c b/block/elevator.c
-index bd71f0f..0628811 100644
+index bd71f0fc4..06288117e 100644
 --- a/block/elevator.c
 +++ b/block/elevator.c
 @@ -624,7 +624,7 @@ out:
@@ -1636,10 +1798,25 @@ index bd71f0f..0628811 100644
  
  	if (q->nr_hw_queues != 1 &&
 diff --git a/block/fops.c b/block/fops.c
-index 6197d1c..01cb626 100644
+index 6197d1c41..b02fe200c 100644
 --- a/block/fops.c
 +++ b/block/fops.c
-@@ -655,24 +655,35 @@ static long blkdev_fallocate(struct file *file, int mode, loff_t start,
+@@ -601,11 +601,12 @@ static ssize_t blkdev_read_iter(struct kiocb *iocb, struct iov_iter *to)
+ 		file_accessed(iocb->ki_filp);
+ 
+ 		ret = blkdev_direct_IO(iocb, to);
+-		if (ret >= 0) {
++		if (ret > 0) {
+ 			iocb->ki_pos += ret;
+ 			count -= ret;
+ 		}
+-		iov_iter_revert(to, count - iov_iter_count(to));
++		if (ret != -EIOCBQUEUED)
++			iov_iter_revert(to, count - iov_iter_count(to));
+ 		if (ret < 0 || !count)
+ 			goto reexpand;
+ 	}
+@@ -655,24 +656,35 @@ static long blkdev_fallocate(struct file *file, int mode, loff_t start,
  
  	filemap_invalidate_lock(inode->i_mapping);
  
@@ -1681,7 +1858,7 @@ index 6197d1c..01cb626 100644
  					     len >> SECTOR_SHIFT, GFP_KERNEL);
  		break;
 diff --git a/block/genhd.c b/block/genhd.c
-index 0c00489..2ee3a35 100644
+index 0c00489b9..7102a044a 100644
 --- a/block/genhd.c
 +++ b/block/genhd.c
 @@ -125,7 +125,7 @@ static void part_stat_read_all(struct block_device *part,
@@ -1742,7 +1919,64 @@ index 0c00489..2ee3a35 100644
  	disk_del_events(disk);
  
  	mutex_lock(&disk->open_mutex);
-@@ -1159,6 +1155,9 @@ static const struct attribute_group *disk_attr_groups[] = {
+@@ -691,13 +687,10 @@ void del_gendisk(struct gendisk *disk)
+ 	 * If the disk does not own the queue, allow using passthrough requests
+ 	 * again.  Else leave the queue frozen to fail all I/O.
+ 	 */
+-	if (!test_bit(GD_OWNS_QUEUE, &disk->state)) {
+-		blk_queue_flag_clear(QUEUE_FLAG_INIT_DONE, q);
++	if (!test_bit(GD_OWNS_QUEUE, &disk->state))
+ 		__blk_mq_unfreeze_queue(q, true);
+-	} else {
+-		if (queue_is_mq(q))
+-			blk_mq_exit_queue(q);
+-	}
++	else if (queue_is_mq(q))
++		blk_mq_exit_queue(q);
+ }
+ EXPORT_SYMBOL(del_gendisk);
+ 
+@@ -747,7 +740,7 @@ static ssize_t disk_badblocks_store(struct device *dev,
+ }
+ 
+ #ifdef CONFIG_BLOCK_LEGACY_AUTOLOAD
+-void blk_request_module(dev_t devt)
++static bool blk_probe_dev(dev_t devt)
+ {
+ 	unsigned int major = MAJOR(devt);
+ 	struct blk_major_name **n;
+@@ -757,14 +750,26 @@ void blk_request_module(dev_t devt)
+ 		if ((*n)->major == major && (*n)->probe) {
+ 			(*n)->probe(devt);
+ 			mutex_unlock(&major_names_lock);
+-			return;
++			return true;
+ 		}
+ 	}
+ 	mutex_unlock(&major_names_lock);
++	return false;
++}
++
++void blk_request_module(dev_t devt)
++{
++	int error;
++
++	if (blk_probe_dev(devt))
++		return;
+ 
+-	if (request_module("block-major-%d-%d", MAJOR(devt), MINOR(devt)) > 0)
+-		/* Make old-style 2.4 aliases work */
+-		request_module("block-major-%d", MAJOR(devt));
++	error = request_module("block-major-%d-%d", MAJOR(devt), MINOR(devt));
++	/* Make old-style 2.4 aliases work */
++	if (error > 0)
++		error = request_module("block-major-%d", MAJOR(devt));
++	if (!error)
++		blk_probe_dev(devt);
+ }
+ #endif /* CONFIG_BLOCK_LEGACY_AUTOLOAD */
+ 
+@@ -1159,6 +1164,9 @@ static const struct attribute_group *disk_attr_groups[] = {
  	&disk_attr_group,
  #ifdef CONFIG_BLK_DEV_IO_TRACE
  	&blk_trace_attr_group,
@@ -1753,7 +1987,7 @@ index 0c00489..2ee3a35 100644
  	NULL
  };
 diff --git a/block/ioctl.c b/block/ioctl.c
-index 3c475e4..c7390d8 100644
+index 3c475e416..552da0ccb 100644
 --- a/block/ioctl.c
 +++ b/block/ioctl.c
 @@ -18,10 +18,8 @@ static int blkpg_do_ioctl(struct block_device *bdev,
@@ -1798,7 +2032,7 @@ index 3c475e4..c7390d8 100644
  	struct inode *inode = bdev->bd_inode;
  	int err;
  
-@@ -109,7 +110,8 @@ static int blk_ioctl_discard(struct block_device *bdev, fmode_t mode,
+@@ -109,11 +110,12 @@ static int blk_ioctl_discard(struct block_device *bdev, fmode_t mode,
  	if (len & 511)
  		return -EINVAL;
  
@@ -1808,8 +2042,37 @@ index 3c475e4..c7390d8 100644
  		return -EINVAL;
  
  	filemap_invalidate_lock(inode->i_mapping);
+-	err = truncate_bdev_range(bdev, mode, start, start + len - 1);
++	err = truncate_bdev_range(bdev, mode, start, end - 1);
+ 	if (err)
+ 		goto fail;
+ 	err = blkdev_issue_discard(bdev, start >> 9, len >> 9, GFP_KERNEL);
+@@ -125,7 +127,7 @@ fail:
+ static int blk_ioctl_secure_erase(struct block_device *bdev, fmode_t mode,
+ 		void __user *argp)
+ {
+-	uint64_t start, len;
++	uint64_t start, len, end;
+ 	uint64_t range[2];
+ 	int err;
+ 
+@@ -140,11 +142,12 @@ static int blk_ioctl_secure_erase(struct block_device *bdev, fmode_t mode,
+ 	len = range[1];
+ 	if ((start & 511) || (len & 511))
+ 		return -EINVAL;
+-	if (start + len > bdev_nr_bytes(bdev))
++	if (check_add_overflow(start, len, &end) ||
++	    end > bdev_nr_bytes(bdev))
+ 		return -EINVAL;
+ 
+ 	filemap_invalidate_lock(bdev->bd_inode->i_mapping);
+-	err = truncate_bdev_range(bdev, mode, start, start + len - 1);
++	err = truncate_bdev_range(bdev, mode, start, end - 1);
+ 	if (!err)
+ 		err = blkdev_issue_secure_erase(bdev, start >> 9, len >> 9,
+ 						GFP_KERNEL);
 diff --git a/block/mq-deadline.c b/block/mq-deadline.c
-index 55e2606..ff029e1 100644
+index 55e26065c..ff029e1ac 100644
 --- a/block/mq-deadline.c
 +++ b/block/mq-deadline.c
 @@ -597,6 +597,20 @@ unlock:
@@ -1857,7 +2120,7 @@ index 55e2606..ff029e1 100644
  
  /* Called by blk_mq_init_hctx() and blk_mq_init_sched(). */
 diff --git a/block/opal_proto.h b/block/opal_proto.h
-index 7152aa1..7f306b0 100644
+index 7152aa1f1..7f306b08a 100644
 --- a/block/opal_proto.h
 +++ b/block/opal_proto.h
 @@ -71,6 +71,7 @@ enum opal_response_token {
@@ -1869,7 +2132,7 @@ index 7152aa1..7f306b0 100644
  #define OPAL_INVAL_PARAM 12
  #define OPAL_MANUFACTURED_INACTIVE 0x08
 diff --git a/block/partitions/core.c b/block/partitions/core.c
-index b8112f5..e4f6f56 100644
+index b8112f52d..e4f6f56ca 100644
 --- a/block/partitions/core.c
 +++ b/block/partitions/core.c
 @@ -453,6 +453,11 @@ int bdev_add_partition(struct gendisk *disk, int partno, sector_t start,
@@ -1899,8 +2162,61 @@ index b8112f5..e4f6f56 100644
  		return true;
  	}
  
+diff --git a/block/partitions/ldm.h b/block/partitions/ldm.h
+index 0a747a0c7..f98dbee94 100644
+--- a/block/partitions/ldm.h
++++ b/block/partitions/ldm.h
+@@ -1,5 +1,5 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+-/**
++/*
+  * ldm - Part of the Linux-NTFS project.
+  *
+  * Copyright (C) 2001,2002 Richard Russon <ldm@flatcap.org>
+diff --git a/block/partitions/mac.c b/block/partitions/mac.c
+index 7b521df00..6415213cd 100644
+--- a/block/partitions/mac.c
++++ b/block/partitions/mac.c
+@@ -51,13 +51,25 @@ int mac_partition(struct parsed_partitions *state)
+ 	}
+ 	secsize = be16_to_cpu(md->block_size);
+ 	put_dev_sector(sect);
++
++	/*
++	 * If the "block size" is not a power of 2, things get weird - we might
++	 * end up with a partition straddling a sector boundary, so we wouldn't
++	 * be able to read a partition entry with read_part_sector().
++	 * Real block sizes are probably (?) powers of two, so just require
++	 * that.
++	 */
++	if (!is_power_of_2(secsize))
++		return -1;
+ 	datasize = round_down(secsize, 512);
+ 	data = read_part_sector(state, datasize / 512, &sect);
+ 	if (!data)
+ 		return -1;
+ 	partoffset = secsize % 512;
+-	if (partoffset + sizeof(*part) > datasize)
++	if (partoffset + sizeof(*part) > datasize) {
++		put_dev_sector(sect);
+ 		return -1;
++	}
+ 	part = (struct mac_partition *) (data + partoffset);
+ 	if (be16_to_cpu(part->signature) != MAC_PARTITION_MAGIC) {
+ 		put_dev_sector(sect);
+@@ -110,8 +122,8 @@ int mac_partition(struct parsed_partitions *state)
+ 				int i, l;
+ 
+ 				goodness++;
+-				l = strlen(part->name);
+-				if (strcmp(part->name, "/") == 0)
++				l = strnlen(part->name, sizeof(part->name));
++				if (strncmp(part->name, "/", sizeof(part->name)) == 0)
+ 					goodness++;
+ 				for (i = 0; i <= l - 4; ++i) {
+ 					if (strncasecmp(part->name + i, "root",
 diff --git a/block/sed-opal.c b/block/sed-opal.c
-index 9bdb833..25e4ce4 100644
+index 9bdb833e5..25e4ce452 100644
 --- a/block/sed-opal.c
 +++ b/block/sed-opal.c
 @@ -935,16 +935,20 @@ static int response_parse(const u8 *buf, size_t length,

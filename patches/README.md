@@ -1,9 +1,9 @@
 # Patches
 
-These patches are generated from:
+These rollback patches are pre-generated from:
 
 - `android14-6.1-2024-01_r24`
-- `android14-6.1-2025-01_r29`
+- each supported target monthly tag in the Android 14 / Linux 6.1 `93..162` window
 
-They are stored as forward diffs from 2024-01 to 2025-01, and the module applies
-them with `git apply --reverse`.
+Each child module resolves the current monthly tag and applies the matching
+stored diff with `git apply --reverse`.

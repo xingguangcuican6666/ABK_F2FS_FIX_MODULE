@@ -1,16 +1,97 @@
 #!/usr/bin/env bash
 
+ABK_STORAGE_ROLLBACK_RESOLVED_TARGET_TAG=""
+
 abk_storage_rollback_common_dir() {
   abk_common_dir
 }
 
+abk_storage_rollback_resolve_target_tag_from_os_patch_level() {
+  case "${ABK_BUILD_OS_PATCH_LEVEL:-}" in
+    2024-09) printf '%s\n' 'android14-6.1-2024-09_r14' ;;
+    2024-10) printf '%s\n' 'android14-6.1-2024-10_r26' ;;
+    2024-11) printf '%s\n' 'android14-6.1-2024-11_r14' ;;
+    2024-12) printf '%s\n' 'android14-6.1-2024-12_r17' ;;
+    2025-01) printf '%s\n' 'android14-6.1-2025-01_r29' ;;
+    2025-02) printf '%s\n' 'android14-6.1-2025-02_r20' ;;
+    2025-03) printf '%s\n' 'android14-6.1-2025-03_r15' ;;
+    2025-04) printf '%s\n' 'android14-6.1-2025-04_r16' ;;
+    2025-05) printf '%s\n' 'android14-6.1-2025-05_r13' ;;
+    2025-06) printf '%s\n' 'android14-6.1-2025-06_r17' ;;
+    2025-07) printf '%s\n' 'android14-6.1-2025-07_r12' ;;
+    2025-08) printf '%s\n' 'android14-6.1-2025-08_r11' ;;
+    2025-09) printf '%s\n' 'android14-6.1-2025-09_r32' ;;
+    2025-12) printf '%s\n' 'android14-6.1-2025-12_r22' ;;
+    2026-03) printf '%s\n' 'android14-6.1-2026-03_r15' ;;
+    *) return 1 ;;
+  esac
+}
+
+abk_storage_rollback_resolve_target_tag_from_sublevel() {
+  local sublevel="${1:-}"
+  case "$sublevel" in
+    9[3-8]) printf '%s\n' 'android14-6.1-2024-09_r14' ;;
+    99|10[0-9]|11[01]) printf '%s\n' 'android14-6.1-2024-10_r26' ;;
+    11[2-4]) printf '%s\n' 'android14-6.1-2024-11_r14' ;;
+    11[5-7]) printf '%s\n' 'android14-6.1-2024-12_r17' ;;
+    11[89]|12[0-3]) printf '%s\n' 'android14-6.1-2025-01_r29' ;;
+    12[4-7]) printf '%s\n' 'android14-6.1-2025-02_r20' ;;
+    128) printf '%s\n' 'android14-6.1-2025-03_r15' ;;
+    12[9]|13[0-3]) printf '%s\n' 'android14-6.1-2025-04_r16' ;;
+    13[4-7]) printf '%s\n' 'android14-6.1-2025-05_r13' ;;
+    13[89]|140) printf '%s\n' 'android14-6.1-2025-06_r17' ;;
+    14[1-4]) printf '%s\n' 'android14-6.1-2025-07_r12' ;;
+    14[5-6]) printf '%s\n' 'android14-6.1-2025-09_r32' ;;
+    15[7-9]|160|161) printf '%s\n' 'android14-6.1-2025-12_r22' ;;
+    162) printf '%s\n' 'android14-6.1-2026-03_r15' ;;
+    *) return 1 ;;
+  esac
+}
+
+abk_storage_rollback_resolve_target_tag() {
+  local tag sublevel
+
+  if [ -n "$ABK_STORAGE_ROLLBACK_RESOLVED_TARGET_TAG" ]; then
+    printf '%s\n' "$ABK_STORAGE_ROLLBACK_RESOLVED_TARGET_TAG"
+    return 0
+  fi
+
+  if tag="$(abk_storage_rollback_resolve_target_tag_from_os_patch_level 2>/dev/null)"; then
+    ABK_STORAGE_ROLLBACK_RESOLVED_TARGET_TAG="$tag"
+    printf '%s\n' "$ABK_STORAGE_ROLLBACK_RESOLVED_TARGET_TAG"
+    return 0
+  fi
+
+  sublevel="${ABK_BUILD_SUB_LEVEL:-$(abk_kernel_sublevel)}"
+  if tag="$(abk_storage_rollback_resolve_target_tag_from_sublevel "$sublevel" 2>/dev/null)"; then
+    ABK_STORAGE_ROLLBACK_RESOLVED_TARGET_TAG="$tag"
+    printf '%s\n' "$ABK_STORAGE_ROLLBACK_RESOLVED_TARGET_TAG"
+    return 0
+  fi
+
+  abk_die "unsupported Android 14 / Linux 6.1 target for storage rollback: os_patch_level=${ABK_BUILD_OS_PATCH_LEVEL:-unknown}, sublevel=${sublevel:-unknown}"
+}
+
+abk_storage_rollback_patch_file() {
+  local patch_subdir="$1"
+  local target_tag patch_file
+
+  target_tag="$(abk_storage_rollback_resolve_target_tag)"
+  abk_log "resolved target tag: $target_tag" >&2
+  patch_file="$MODULE_DIR/patches/$patch_subdir/${target_tag}.patch"
+  abk_require_file "$patch_file"
+  printf '%s\n' "$patch_file"
+}
+
 abk_storage_rollback_patch() {
   local patch_subdir="$1"
-  local common_dir
+  local common_dir patch_file
 
   common_dir="$(abk_storage_rollback_common_dir)"
   abk_require_dir "$common_dir"
-  abk_apply_reverse_patch "$MODULE_DIR/patches/$patch_subdir/rollback.patch" "$common_dir"
+
+  patch_file="$(abk_storage_rollback_patch_file "$patch_subdir")"
+  abk_apply_reverse_patch "$patch_file" "$common_dir"
 }
 
 abk_storage_rollback_f2fs_is_applied() {
@@ -29,9 +110,9 @@ abk_storage_rollback_f2fs_patch() {
   local common_dir patch_file
 
   common_dir="$(abk_storage_rollback_common_dir)"
-  patch_file="$MODULE_DIR/patches/storage_f2fs_rollback/rollback.patch"
-
   abk_require_dir "$common_dir"
+
+  patch_file="$(abk_storage_rollback_patch_file "storage_f2fs_rollback")"
   abk_require_file "$patch_file"
 
   (

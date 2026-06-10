@@ -37,6 +37,18 @@ abk_require_dir() {
   [ -d "$path" ] || abk_die "required directory not found: $path"
 }
 
+abk_kernel_make_value() {
+  local key="$1"
+  local makefile
+  makefile="$(abk_common_dir)/Makefile"
+  abk_require_file "$makefile"
+  awk -v key="$key" '$1 == key && $2 == "=" { print $3; exit }' "$makefile"
+}
+
+abk_kernel_sublevel() {
+  abk_kernel_make_value SUBLEVEL
+}
+
 abk_apply_reverse_patch() {
   local patch_file="$1"
   local target_dir="${2:-$(abk_common_dir)}"
