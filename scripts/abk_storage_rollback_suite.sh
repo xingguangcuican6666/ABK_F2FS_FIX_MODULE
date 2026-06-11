@@ -272,6 +272,11 @@ abk_storage_rollback_apply_child() {
       abk_require_dir "$(abk_storage_rollback_common_dir)/block"
       abk_storage_rollback_patch "storage_block_rollback"
       ;;
+    storage_dm_core_crypto_rollback)
+      abk_log "apply child: $child_id"
+      abk_require_dir "$(abk_storage_rollback_common_dir)/drivers/md"
+      abk_storage_rollback_patch "storage_dm_core_crypto_rollback"
+      ;;
     storage_f2fs_rollback)
       abk_log "apply child: $child_id"
       abk_require_dir "$(abk_storage_rollback_common_dir)/fs/f2fs"

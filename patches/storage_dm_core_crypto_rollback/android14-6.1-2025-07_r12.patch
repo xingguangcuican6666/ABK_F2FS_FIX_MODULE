@@ -1,0 +1,321 @@
+diff --git a/drivers/md/Kconfig b/drivers/md/Kconfig
+index ef70f60..5e11d7c 100644
+--- a/drivers/md/Kconfig
++++ b/drivers/md/Kconfig
+@@ -671,6 +671,7 @@ config DM_ZONED
+ 
+ config DM_AUDIT
+ 	bool "DM audit events"
++	depends on BLK_DEV_DM
+ 	depends on AUDIT
+ 	help
+ 	  Generate audit events for device-mapper.
+@@ -678,6 +679,18 @@ config DM_AUDIT
+ 	  Enables audit logging of several security relevant events in the
+ 	  particular device-mapper targets, especially the integrity target.
+ 
++config DM_BOW
++	tristate "Backup block device"
++	depends on BLK_DEV_DM
++	select DM_BUFIO
++	help
++	  This device-mapper target takes a device and keeps a log of all
++	  changes using free blocks identified by issuing a trim command.
++	  This can then be restored by running a command line utility,
++	  or committed by simply replacing the target.
++
++	  If unsure, say N.
++
+ config DM_USER
+ 	tristate "Block device in userspace"
+ 	depends on BLK_DEV_DM
+diff --git a/drivers/md/Makefile b/drivers/md/Makefile
+index 369f2ae..4c60760 100644
+--- a/drivers/md/Makefile
++++ b/drivers/md/Makefile
+@@ -85,6 +85,7 @@ obj-$(CONFIG_DM_INTEGRITY)	+= dm-integrity.o
+ obj-$(CONFIG_DM_ZONED)		+= dm-zoned.o
+ obj-$(CONFIG_DM_WRITECACHE)	+= dm-writecache.o
+ obj-$(CONFIG_SECURITY_LOADPIN_VERITY)	+= dm-verity-loadpin.o
++obj-$(CONFIG_DM_BOW)		+= dm-bow.o
+ obj-$(CONFIG_DM_USER)		+= dm-user.o
+ 
+ ifeq ($(CONFIG_DM_INIT),y)
+diff --git a/drivers/md/dm-core.h b/drivers/md/dm-core.h
+index 28c6413..371d262 100644
+--- a/drivers/md/dm-core.h
++++ b/drivers/md/dm-core.h
+@@ -21,6 +21,8 @@
+ #include "dm-ima.h"
+ 
+ #define DM_RESERVED_MAX_IOS		1024
++#define DM_MAX_TARGETS			1048576
++#define DM_MAX_TARGET_PARAMS		1024
+ 
+ struct dm_io;
+ 
+diff --git a/drivers/md/dm-ioctl.c b/drivers/md/dm-ioctl.c
+index 2afd2d2..ba679ba 100644
+--- a/drivers/md/dm-ioctl.c
++++ b/drivers/md/dm-ioctl.c
+@@ -1156,8 +1156,26 @@ static int do_resume(struct dm_ioctl *param)
+ 			suspend_flags &= ~DM_SUSPEND_LOCKFS_FLAG;
+ 		if (param->flags & DM_NOFLUSH_FLAG)
+ 			suspend_flags |= DM_SUSPEND_NOFLUSH_FLAG;
+-		if (!dm_suspended_md(md))
+-			dm_suspend(md, suspend_flags);
++		if (!dm_suspended_md(md)) {
++			r = dm_suspend(md, suspend_flags);
++			if (r) {
++				down_write(&_hash_lock);
++				hc = dm_get_mdptr(md);
++				if (hc && !hc->new_map) {
++					hc->new_map = new_map;
++					new_map = NULL;
++				} else {
++					r = -ENXIO;
++				}
++				up_write(&_hash_lock);
++				if (new_map) {
++					dm_sync_table(md);
++					dm_table_destroy(new_map);
++				}
++				dm_put(md);
++				return r;
++			}
++		}
+ 
+ 		old_size = dm_get_size(md);
+ 		old_map = dm_swap_table(md, new_map);
+@@ -1872,7 +1890,8 @@ static int copy_params(struct dm_ioctl __user *user, struct dm_ioctl *param_kern
+ 			   minimum_data_size - sizeof(param_kernel->version)))
+ 		return -EFAULT;
+ 
+-	if (param_kernel->data_size < minimum_data_size) {
++	if (unlikely(param_kernel->data_size < minimum_data_size) ||
++	    unlikely(param_kernel->data_size > DM_MAX_TARGETS * DM_MAX_TARGET_PARAMS)) {
+ 		DMERR("Invalid data size in the ioctl structure: %u",
+ 		      param_kernel->data_size);
+ 		return -EINVAL;
+diff --git a/drivers/md/dm-rq.c b/drivers/md/dm-rq.c
+index 80f46e0..6685dc3 100644
+--- a/drivers/md/dm-rq.c
++++ b/drivers/md/dm-rq.c
+@@ -493,8 +493,10 @@ static blk_status_t dm_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
+ 
+ 		map = dm_get_live_table(md, &srcu_idx);
+ 		if (unlikely(!map)) {
++			DMERR_LIMIT("%s: mapping table unavailable, erroring io",
++				    dm_device_name(md));
+ 			dm_put_live_table(md, srcu_idx);
+-			return BLK_STS_RESOURCE;
++			return BLK_STS_IOERR;
+ 		}
+ 		ti = dm_table_find_target(map, 0);
+ 		dm_put_live_table(md, srcu_idx);
+diff --git a/drivers/md/dm-table.c b/drivers/md/dm-table.c
+index ba2cec2..171e101 100644
+--- a/drivers/md/dm-table.c
++++ b/drivers/md/dm-table.c
+@@ -72,7 +72,7 @@ static sector_t high(struct dm_table *t, unsigned int l, unsigned int n)
+ 		n = get_child(n, CHILDREN_PER_NODE - 1);
+ 
+ 	if (n >= t->counts[l])
+-		return (sector_t) - 1;
++		return (sector_t) -1;
+ 
+ 	return get_node(t, l, n)[KEYS_PER_NODE - 1];
+ }
+@@ -128,7 +128,12 @@ static int alloc_targets(struct dm_table *t, unsigned int num)
+ int dm_table_create(struct dm_table **result, fmode_t mode,
+ 		    unsigned int num_targets, struct mapped_device *md)
+ {
+-	struct dm_table *t = kzalloc(sizeof(*t), GFP_KERNEL);
++	struct dm_table *t;
++
++	if (num_targets > DM_MAX_TARGETS)
++		return -EOVERFLOW;
++
++	t = kzalloc(sizeof(*t), GFP_KERNEL);
+ 
+ 	if (!t)
+ 		return -ENOMEM;
+@@ -142,7 +147,7 @@ int dm_table_create(struct dm_table **result, fmode_t mode,
+ 
+ 	if (!num_targets) {
+ 		kfree(t);
+-		return -ENOMEM;
++		return -EOVERFLOW;
+ 	}
+ 
+ 	if (alloc_targets(t, num_targets)) {
+@@ -481,8 +486,9 @@ static char **realloc_argv(unsigned int *size, char **old_argv)
+ 		gfp = GFP_NOIO;
+ 	}
+ 	argv = kmalloc_array(new_size, sizeof(*argv), gfp);
+-	if (argv && old_argv) {
+-		memcpy(argv, old_argv, *size * sizeof(*argv));
++	if (argv) {
++		if (old_argv)
++			memcpy(argv, old_argv, *size * sizeof(*argv));
+ 		*size = new_size;
+ 	}
+ 
+@@ -649,6 +655,10 @@ int dm_table_add_target(struct dm_table *t, const char *type,
+ 		DMERR("%s: zero-length target", dm_device_name(t->md));
+ 		return -EINVAL;
+ 	}
++	if (start + len < start || start + len > LLONG_MAX >> SECTOR_SHIFT) {
++		DMERR("%s: too large device", dm_device_name(t->md));
++		return -EINVAL;
++	}
+ 
+ 	ti->type = dm_get_target_type(type);
+ 	if (!ti->type) {
+@@ -1221,7 +1231,7 @@ static int dm_keyslot_evict(struct blk_crypto_profile *profile,
+ 
+ 	t = dm_get_live_table(md, &srcu_idx);
+ 	if (!t)
+-		return 0;
++		goto put_live_table;
+ 
+ 	for (unsigned int i = 0; i < t->num_targets; i++) {
+ 		struct dm_target *ti = dm_table_get_target(t, i);
+@@ -1232,6 +1242,7 @@ static int dm_keyslot_evict(struct blk_crypto_profile *profile,
+ 					  (void *)key);
+ 	}
+ 
++put_live_table:
+ 	dm_put_live_table(md, srcu_idx);
+ 	return 0;
+ }
+@@ -1576,7 +1587,7 @@ static bool dm_table_any_dev_attr(struct dm_table *t,
+ 		if (ti->type->iterate_devices &&
+ 		    ti->type->iterate_devices(ti, func, data))
+ 			return true;
+-        }
++	}
+ 
+ 	return false;
+ }
+diff --git a/drivers/md/dm.c b/drivers/md/dm.c
+index 0ec85d1..4767265 100644
+--- a/drivers/md/dm.c
++++ b/drivers/md/dm.c
+@@ -1523,14 +1523,18 @@ static void __send_empty_flush(struct clone_info *ci)
+ {
+ 	struct dm_table *t = ci->map;
+ 	struct bio flush_bio;
++	blk_opf_t opf = REQ_OP_WRITE | REQ_PREFLUSH | REQ_SYNC;
++
++	if ((ci->io->orig_bio->bi_opf & (REQ_IDLE | REQ_SYNC)) ==
++	    (REQ_IDLE | REQ_SYNC))
++		opf |= REQ_IDLE;
+ 
+ 	/*
+ 	 * Use an on-stack bio for this, it's safe since we don't
+ 	 * need to reference it after submit. It's just used as
+ 	 * the basis for the clone(s).
+ 	 */
+-	bio_init(&flush_bio, ci->io->md->disk->part0, NULL, 0,
+-		 REQ_OP_WRITE | REQ_PREFLUSH | REQ_SYNC);
++	bio_init(&flush_bio, ci->io->md->disk->part0, NULL, 0, opf);
+ 
+ 	ci->bio = &flush_bio;
+ 	ci->sector_count = 0;
+@@ -1789,10 +1793,15 @@ static void dm_submit_bio(struct bio *bio)
+ 	struct dm_table *map;
+ 
+ 	map = dm_get_live_table(md, &srcu_idx);
++	if (unlikely(!map)) {
++		DMERR_LIMIT("%s: mapping table unavailable, erroring io",
++			    dm_device_name(md));
++		bio_io_error(bio);
++		goto out;
++	}
+ 
+-	/* If suspended, or map not yet available, queue this IO for later */
+-	if (unlikely(test_bit(DMF_BLOCK_IO_FOR_SUSPEND, &md->flags)) ||
+-	    unlikely(!map)) {
++	/* If suspended, queue this IO for later */
++	if (unlikely(test_bit(DMF_BLOCK_IO_FOR_SUSPEND, &md->flags))) {
+ 		if (bio->bi_opf & REQ_NOWAIT)
+ 			bio_wouldblock_error(bio);
+ 		else if (bio->bi_opf & REQ_RAHEAD)
+@@ -2511,7 +2520,7 @@ static int dm_wait_for_bios_completion(struct mapped_device *md, unsigned int ta
+ 			break;
+ 
+ 		if (signal_pending_state(task_state, current)) {
+-			r = -EINTR;
++			r = -ERESTARTSYS;
+ 			break;
+ 		}
+ 
+@@ -2536,7 +2545,7 @@ static int dm_wait_for_completion(struct mapped_device *md, unsigned int task_st
+ 			break;
+ 
+ 		if (signal_pending_state(task_state, current)) {
+-			r = -EINTR;
++			r = -ERESTARTSYS;
+ 			break;
+ 		}
+ 
+@@ -2897,6 +2906,9 @@ static void __dm_internal_suspend(struct mapped_device *md, unsigned int suspend
+ 
+ static void __dm_internal_resume(struct mapped_device *md)
+ {
++	int r;
++	struct dm_table *map;
++
+ 	BUG_ON(!md->internal_suspend_count);
+ 
+ 	if (--md->internal_suspend_count)
+@@ -2905,12 +2917,23 @@ static void __dm_internal_resume(struct mapped_device *md)
+ 	if (dm_suspended_md(md))
+ 		goto done; /* resume from nested suspend */
+ 
+-	/*
+-	 * NOTE: existing callers don't need to call dm_table_resume_targets
+-	 * (which may fail -- so best to avoid it for now by passing NULL map)
+-	 */
+-	(void) __dm_resume(md, NULL);
+-
++	map = rcu_dereference_protected(md->map, lockdep_is_held(&md->suspend_lock));
++	r = __dm_resume(md, map);
++	if (r) {
++		/*
++		 * If a preresume method of some target failed, we are in a
++		 * tricky situation. We can't return an error to the caller. We
++		 * can't fake success because then the "resume" and
++		 * "postsuspend" methods would not be paired correctly, and it
++		 * would break various targets, for example it would cause list
++		 * corruption in the "origin" target.
++		 *
++		 * So, we fake normal suspend here, to make sure that the
++		 * "resume" and "postsuspend" methods will be paired correctly.
++		 */
++		DMERR("Preresume method failed: %d", r);
++		set_bit(DMF_SUSPENDED, &md->flags);
++	}
+ done:
+ 	clear_bit(DMF_SUSPENDED_INTERNALLY, &md->flags);
+ 	smp_mb__after_atomic();
+diff --git a/fs/crypto/fname.c b/fs/crypto/fname.c
+index 6eae3f1..553af73 100644
+--- a/fs/crypto/fname.c
++++ b/fs/crypto/fname.c
+@@ -74,13 +74,7 @@ struct fscrypt_nokey_name {
+ 
+ static inline bool fscrypt_is_dot_dotdot(const struct qstr *str)
+ {
+-	if (str->len == 1 && str->name[0] == '.')
+-		return true;
+-
+-	if (str->len == 2 && str->name[0] == '.' && str->name[1] == '.')
+-		return true;
+-
+-	return false;
++	return is_dot_dotdot(str->name, str->len);
+ }
+ 
+ /**

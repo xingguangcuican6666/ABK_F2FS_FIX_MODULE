@@ -35,6 +35,11 @@ set, all children are applied in this order:
 3. `storage_f2fs_rollback`
 4. `storage_common_fixups`
 
+Optional child kept out of default apply-all:
+
+- `storage_dm_core_crypto_rollback`
+  This preserves the low-risk dm core + fs/crypto/fname rollback experiment without changing the suite's default behavior.
+
 ## Integration
 
 ```bash

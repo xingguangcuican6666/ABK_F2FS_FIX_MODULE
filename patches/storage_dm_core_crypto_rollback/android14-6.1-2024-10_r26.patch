@@ -1,0 +1,128 @@
+diff --git a/drivers/md/Kconfig b/drivers/md/Kconfig
+index ef70f60..653fd80 100644
+--- a/drivers/md/Kconfig
++++ b/drivers/md/Kconfig
+@@ -671,6 +671,7 @@ config DM_ZONED
+ 
+ config DM_AUDIT
+ 	bool "DM audit events"
++	depends on BLK_DEV_DM
+ 	depends on AUDIT
+ 	help
+ 	  Generate audit events for device-mapper.
+diff --git a/drivers/md/dm-core.h b/drivers/md/dm-core.h
+index 28c6413..371d262 100644
+--- a/drivers/md/dm-core.h
++++ b/drivers/md/dm-core.h
+@@ -21,6 +21,8 @@
+ #include "dm-ima.h"
+ 
+ #define DM_RESERVED_MAX_IOS		1024
++#define DM_MAX_TARGETS			1048576
++#define DM_MAX_TARGET_PARAMS		1024
+ 
+ struct dm_io;
+ 
+diff --git a/drivers/md/dm-ioctl.c b/drivers/md/dm-ioctl.c
+index 2afd2d2..386c696 100644
+--- a/drivers/md/dm-ioctl.c
++++ b/drivers/md/dm-ioctl.c
+@@ -1872,7 +1872,8 @@ static int copy_params(struct dm_ioctl __user *user, struct dm_ioctl *param_kern
+ 			   minimum_data_size - sizeof(param_kernel->version)))
+ 		return -EFAULT;
+ 
+-	if (param_kernel->data_size < minimum_data_size) {
++	if (unlikely(param_kernel->data_size < minimum_data_size) ||
++	    unlikely(param_kernel->data_size > DM_MAX_TARGETS * DM_MAX_TARGET_PARAMS)) {
+ 		DMERR("Invalid data size in the ioctl structure: %u",
+ 		      param_kernel->data_size);
+ 		return -EINVAL;
+diff --git a/drivers/md/dm-table.c b/drivers/md/dm-table.c
+index ba2cec2..a67f9d2 100644
+--- a/drivers/md/dm-table.c
++++ b/drivers/md/dm-table.c
+@@ -72,7 +72,7 @@ static sector_t high(struct dm_table *t, unsigned int l, unsigned int n)
+ 		n = get_child(n, CHILDREN_PER_NODE - 1);
+ 
+ 	if (n >= t->counts[l])
+-		return (sector_t) - 1;
++		return (sector_t) -1;
+ 
+ 	return get_node(t, l, n)[KEYS_PER_NODE - 1];
+ }
+@@ -128,7 +128,12 @@ static int alloc_targets(struct dm_table *t, unsigned int num)
+ int dm_table_create(struct dm_table **result, fmode_t mode,
+ 		    unsigned int num_targets, struct mapped_device *md)
+ {
+-	struct dm_table *t = kzalloc(sizeof(*t), GFP_KERNEL);
++	struct dm_table *t;
++
++	if (num_targets > DM_MAX_TARGETS)
++		return -EOVERFLOW;
++
++	t = kzalloc(sizeof(*t), GFP_KERNEL);
+ 
+ 	if (!t)
+ 		return -ENOMEM;
+@@ -142,7 +147,7 @@ int dm_table_create(struct dm_table **result, fmode_t mode,
+ 
+ 	if (!num_targets) {
+ 		kfree(t);
+-		return -ENOMEM;
++		return -EOVERFLOW;
+ 	}
+ 
+ 	if (alloc_targets(t, num_targets)) {
+@@ -1576,7 +1581,7 @@ static bool dm_table_any_dev_attr(struct dm_table *t,
+ 		if (ti->type->iterate_devices &&
+ 		    ti->type->iterate_devices(ti, func, data))
+ 			return true;
+-        }
++	}
+ 
+ 	return false;
+ }
+diff --git a/drivers/md/dm.c b/drivers/md/dm.c
+index 0ec85d1..29270f6 100644
+--- a/drivers/md/dm.c
++++ b/drivers/md/dm.c
+@@ -2897,6 +2897,9 @@ static void __dm_internal_suspend(struct mapped_device *md, unsigned int suspend
+ 
+ static void __dm_internal_resume(struct mapped_device *md)
+ {
++	int r;
++	struct dm_table *map;
++
+ 	BUG_ON(!md->internal_suspend_count);
+ 
+ 	if (--md->internal_suspend_count)
+@@ -2905,12 +2908,23 @@ static void __dm_internal_resume(struct mapped_device *md)
+ 	if (dm_suspended_md(md))
+ 		goto done; /* resume from nested suspend */
+ 
+-	/*
+-	 * NOTE: existing callers don't need to call dm_table_resume_targets
+-	 * (which may fail -- so best to avoid it for now by passing NULL map)
+-	 */
+-	(void) __dm_resume(md, NULL);
+-
++	map = rcu_dereference_protected(md->map, lockdep_is_held(&md->suspend_lock));
++	r = __dm_resume(md, map);
++	if (r) {
++		/*
++		 * If a preresume method of some target failed, we are in a
++		 * tricky situation. We can't return an error to the caller. We
++		 * can't fake success because then the "resume" and
++		 * "postsuspend" methods would not be paired correctly, and it
++		 * would break various targets, for example it would cause list
++		 * corruption in the "origin" target.
++		 *
++		 * So, we fake normal suspend here, to make sure that the
++		 * "resume" and "postsuspend" methods will be paired correctly.
++		 */
++		DMERR("Preresume method failed: %d", r);
++		set_bit(DMF_SUSPENDED, &md->flags);
++	}
+ done:
+ 	clear_bit(DMF_SUSPENDED_INTERNALLY, &md->flags);
+ 	smp_mb__after_atomic();
