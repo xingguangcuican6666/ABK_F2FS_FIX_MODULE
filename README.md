@@ -29,7 +29,9 @@ At runtime the module resolves the target monthly tag from:
 3. `common/Makefile` `SUBLEVEL`, as a fallback
 
 It then selects the matching pre-generated rollback patch set stored in this
-repository and applies it with `git apply --reverse`.
+repository and applies it with `git apply --reverse`. If the exact monthly
+patch no longer matches but a nearby stored patch for the same kernel branch
+does, the module will fall back to the nearest applicable patch automatically.
 
 Some 5.15 monthly targets intentionally carry empty patch files for a child
 module when that child has no delta at that month; these are treated as no-op

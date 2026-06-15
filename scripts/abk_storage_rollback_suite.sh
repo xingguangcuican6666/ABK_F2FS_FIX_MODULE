@@ -178,30 +178,166 @@ abk_storage_rollback_patch_file() {
   printf '%s\n' "$patch_file"
 }
 
+abk_storage_rollback_patch_candidates() {
+  local patch_subdir="$1"
+  local target_tag kernel_branch patch_dir
+  local -a candidates=() ordered=()
+  local total index left right found
+
+  target_tag="$(abk_storage_rollback_resolve_target_tag)"
+  kernel_branch="$(abk_storage_rollback_kernel_branch)"
+  patch_dir="$MODULE_DIR/patches/$patch_subdir"
+
+  mapfile -t ordered < <(
+    find "$patch_dir" -maxdepth 1 -type f -name "${kernel_branch}-*.patch" -printf '%f\n' |
+      LC_ALL=C sort
+  )
+
+  total="${#ordered[@]}"
+  if [ "$total" -eq 0 ]; then
+    return 1
+  fi
+
+  found=-1
+  for index in "${!ordered[@]}"; do
+    if [ "${ordered[$index]}" = "${target_tag}.patch" ]; then
+      found="$index"
+      break
+    fi
+  done
+
+  if [ "$found" -lt 0 ]; then
+    for index in "${!ordered[@]}"; do
+      if [[ "${ordered[$index]}" > "${target_tag}.patch" ]]; then
+        found="$index"
+        break
+      fi
+    done
+    if [ "$found" -lt 0 ]; then
+      found=$((total - 1))
+    fi
+  fi
+
+  left="$found"
+  right=$((found + 1))
+
+  while [ "$left" -ge 0 ] || [ "$right" -lt "$total" ]; do
+    if [ "$left" -ge 0 ]; then
+      candidates+=("$patch_dir/${ordered[$left]}")
+      left=$((left - 1))
+    fi
+    if [ "$right" -lt "$total" ]; then
+      candidates+=("$patch_dir/${ordered[$right]}")
+      right=$((right + 1))
+    fi
+  done
+
+  printf '%s\n' "${candidates[@]}"
+}
+
+abk_storage_rollback_probe_patch_file() {
+  local patch_file="$1"
+  local target_dir="$2"
+
+  (
+    cd "$target_dir" || exit
+    if git apply --reverse --check --allow-empty "$patch_file" >/dev/null 2>&1; then
+      printf '%s\n' "reverse|$patch_file"
+      exit 0
+    fi
+
+    if git apply --check --allow-empty "$patch_file" >/dev/null 2>&1; then
+      printf '%s\n' "already|$patch_file"
+      exit 0
+    fi
+  )
+}
+
+abk_storage_rollback_select_patch() {
+  local patch_subdir="$1"
+  local target_dir="$2"
+  local target_tag patch_file result selected_file selected_name
+  local exact_file=""
+  local -a candidates=()
+
+  target_tag="$(abk_storage_rollback_resolve_target_tag)"
+  exact_file="$MODULE_DIR/patches/$patch_subdir/${target_tag}.patch"
+
+  if [ -f "$exact_file" ]; then
+    candidates+=("$exact_file")
+  fi
+
+  while IFS= read -r patch_file; do
+    [ -n "$patch_file" ] || continue
+    if [ "$patch_file" = "$exact_file" ]; then
+      continue
+    fi
+    candidates+=("$patch_file")
+  done < <(abk_storage_rollback_patch_candidates "$patch_subdir")
+
+  for patch_file in "${candidates[@]}"; do
+    result="$(abk_storage_rollback_probe_patch_file "$patch_file" "$target_dir" || true)"
+    if [ -z "$result" ]; then
+      continue
+    fi
+
+    selected_file="${result#*|}"
+    selected_name="$(basename "$selected_file" .patch)"
+    if [ "$selected_name" != "$target_tag" ]; then
+      abk_warn "target patch $target_tag did not match; fallback to $selected_name"
+    fi
+    printf '%s\n' "$result"
+    return 0
+  done
+
+  return 1
+}
+
+abk_storage_rollback_apply_selected_patch() {
+  local patch_subdir="$1"
+  local target_dir="$2"
+  local result mode patch_file
+
+  result="$(abk_storage_rollback_select_patch "$patch_subdir" "$target_dir")" || return 1
+  mode="${result%%|*}"
+  patch_file="${result#*|}"
+
+  case "$mode" in
+    reverse)
+      (
+        cd "$target_dir" || exit
+        git apply --reverse --allow-empty "$patch_file"
+      )
+      abk_log "applied rollback patch: $patch_file"
+      ;;
+    already)
+      abk_log "rollback patch already applied: $patch_file"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 abk_storage_rollback_patch() {
   local patch_subdir="$1"
-  local common_dir patch_file
+  local common_dir
 
   common_dir="$(abk_storage_rollback_common_dir)"
   abk_require_dir "$common_dir"
 
-  patch_file="$(abk_storage_rollback_patch_file "$patch_subdir")"
-  abk_apply_reverse_patch "$patch_file" "$common_dir"
+  abk_storage_rollback_apply_selected_patch "$patch_subdir" "$common_dir" ||
+    abk_die "rollback patch does not match current kernel tree: $(abk_storage_rollback_resolve_target_tag)"
 }
 
 abk_storage_rollback_optional_patch() {
   local patch_subdir="$1"
-  local common_dir patch_file
+  local common_dir
 
   common_dir="$(abk_storage_rollback_common_dir)"
   abk_require_dir "$common_dir"
 
-  patch_file="$MODULE_DIR/patches/$patch_subdir/$(abk_storage_rollback_resolve_target_tag).patch"
-  if [ ! -f "$patch_file" ]; then
-    return 1
-  fi
-
-  abk_apply_reverse_patch "$patch_file" "$common_dir"
+  abk_storage_rollback_apply_selected_patch "$patch_subdir" "$common_dir"
 }
 
 abk_storage_rollback_f2fs_is_applied() {
@@ -217,27 +353,14 @@ abk_storage_rollback_f2fs_is_applied() {
 }
 
 abk_storage_rollback_f2fs_patch() {
-  local common_dir patch_file
+  local common_dir
 
   common_dir="$(abk_storage_rollback_common_dir)"
   abk_require_dir "$common_dir"
 
-  patch_file="$(abk_storage_rollback_patch_file "storage_f2fs_rollback")"
-  abk_require_file "$patch_file"
-
-  (
-    cd "$common_dir" || exit
-    if git apply --reverse --check --allow-empty "$patch_file" >/dev/null 2>&1; then
-      git apply --reverse --allow-empty "$patch_file"
-      abk_log "applied rollback patch: $patch_file"
-      exit 0
-    fi
-
-    if git apply --check --allow-empty "$patch_file" >/dev/null 2>&1; then
-      abk_log "rollback patch already applied: $patch_file"
-      exit 0
-    fi
-  )
+  if abk_storage_rollback_apply_selected_patch "storage_f2fs_rollback" "$common_dir"; then
+    return 0
+  fi
 
   if abk_storage_rollback_f2fs_is_applied; then
     abk_log "F2FS rollback already applied with compatibility fixups"
