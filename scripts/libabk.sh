@@ -27,6 +27,21 @@ abk_common_dir() {
   printf '%s/common\n' "$KERNEL_ROOT"
 }
 
+abk_kernel_makefile_path() {
+  local common_makefile root_makefile
+
+  common_makefile="$(abk_common_dir)/Makefile"
+  root_makefile="$KERNEL_ROOT/Makefile"
+
+  if [ -f "$common_makefile" ]; then
+    printf '%s\n' "$common_makefile"
+    return 0
+  fi
+
+  abk_require_file "$root_makefile"
+  printf '%s\n' "$root_makefile"
+}
+
 abk_require_file() {
   local path="$1"
   [ -f "$path" ] || abk_die "required file not found: $path"
@@ -40,8 +55,7 @@ abk_require_dir() {
 abk_kernel_make_value() {
   local key="$1"
   local makefile
-  makefile="$(abk_common_dir)/Makefile"
-  abk_require_file "$makefile"
+  makefile="$(abk_kernel_makefile_path)"
   awk -v key="$key" '$1 == key && $2 == "=" { print $3; exit }' "$makefile"
 }
 
@@ -58,13 +72,13 @@ abk_apply_reverse_patch() {
 
   (
     cd "$target_dir" || exit
-    if git apply --reverse --check "$patch_file" >/dev/null 2>&1; then
-      git apply --reverse "$patch_file"
+    if git apply --reverse --check --allow-empty "$patch_file" >/dev/null 2>&1; then
+      git apply --reverse --allow-empty "$patch_file"
       abk_log "applied rollback patch: $patch_file"
       exit 0
     fi
 
-    if git apply --check "$patch_file" >/dev/null 2>&1; then
+    if git apply --check --allow-empty "$patch_file" >/dev/null 2>&1; then
       abk_log "rollback patch already applied: $patch_file"
       exit 0
     fi

@@ -1,0 +1,232 @@
+diff --git a/block/bfq-cgroup.c b/block/bfq-cgroup.c
+index 53e275e..d651bd8 100644
+--- a/block/bfq-cgroup.c
++++ b/block/bfq-cgroup.c
+@@ -463,7 +463,7 @@ static int bfqg_stats_init(struct bfqg_stats *stats, gfp_t gfp)
+ {
+ 	if (blkg_rwstat_init(&stats->bytes, gfp) ||
+ 	    blkg_rwstat_init(&stats->ios, gfp))
+-		return -ENOMEM;
++		goto error;
+ 
+ #ifdef CONFIG_BFQ_CGROUP_DEBUG
+ 	if (blkg_rwstat_init(&stats->merged, gfp) ||
+@@ -476,13 +476,15 @@ static int bfqg_stats_init(struct bfqg_stats *stats, gfp_t gfp)
+ 	    bfq_stat_init(&stats->dequeue, gfp) ||
+ 	    bfq_stat_init(&stats->group_wait_time, gfp) ||
+ 	    bfq_stat_init(&stats->idle_time, gfp) ||
+-	    bfq_stat_init(&stats->empty_time, gfp)) {
+-		bfqg_stats_exit(stats);
+-		return -ENOMEM;
+-	}
++	    bfq_stat_init(&stats->empty_time, gfp))
++		goto error;
+ #endif
+ 
+ 	return 0;
++
++error:
++	bfqg_stats_exit(stats);
++	return -ENOMEM;
+ }
+ 
+ static struct bfq_group_data *cpd_to_bfqgd(struct blkcg_policy_data *cpd)
+diff --git a/block/bio-integrity.c b/block/bio-integrity.c
+index 4f34ac2..bb364a2 100644
+--- a/block/bio-integrity.c
++++ b/block/bio-integrity.c
+@@ -203,8 +203,7 @@ bool bio_integrity_prep(struct bio *bio)
+ 	unsigned long start, end;
+ 	unsigned int len, nr_pages;
+ 	unsigned int bytes, offset, i;
+-	unsigned int intervals;
+-	blk_status_t status;
++	gfp_t gfp = GFP_NOIO;
+ 
+ 	if (!bi)
+ 		return true;
+@@ -227,13 +226,19 @@ bool bio_integrity_prep(struct bio *bio)
+ 		if (!bi->profile->generate_fn ||
+ 		    !(bi->flags & BLK_INTEGRITY_GENERATE))
+ 			return true;
++
++		/*
++		 * Zero the memory allocated to not leak uninitialized kernel
++		 * memory to disk.  For PI this only affects the app tag, but
++		 * for non-integrity metadata it affects the entire metadata
++		 * buffer.
++		 */
++		gfp |= __GFP_ZERO;
+ 	}
+-	intervals = bio_integrity_intervals(bi, bio_sectors(bio));
+ 
+ 	/* Allocate kernel buffer for protection data */
+-	len = intervals * bi->tuple_size;
+-	buf = kmalloc(len, GFP_NOIO);
+-	status = BLK_STS_RESOURCE;
++	len = bio_integrity_bytes(bi, bio_sectors(bio));
++	buf = kmalloc(len, gfp);
+ 	if (unlikely(buf == NULL)) {
+ 		printk(KERN_ERR "could not allocate integrity buffer\n");
+ 		goto err_end_io;
+@@ -248,7 +253,6 @@ bool bio_integrity_prep(struct bio *bio)
+ 	if (IS_ERR(bip)) {
+ 		printk(KERN_ERR "could not allocate data integrity bioset\n");
+ 		kfree(buf);
+-		status = BLK_STS_RESOURCE;
+ 		goto err_end_io;
+ 	}
+ 
+@@ -276,7 +280,6 @@ bool bio_integrity_prep(struct bio *bio)
+ 
+ 		if (ret == 0) {
+ 			printk(KERN_ERR "could not attach integrity payload\n");
+-			status = BLK_STS_RESOURCE;
+ 			goto err_end_io;
+ 		}
+ 
+@@ -298,7 +301,7 @@ bool bio_integrity_prep(struct bio *bio)
+ 	return true;
+ 
+ err_end_io:
+-	bio->bi_status = status;
++	bio->bi_status = BLK_STS_RESOURCE;
+ 	bio_endio(bio);
+ 	return false;
+ 
+diff --git a/block/blk-integrity.c b/block/blk-integrity.c
+index 16d5d53..85edf66 100644
+--- a/block/blk-integrity.c
++++ b/block/blk-integrity.c
+@@ -431,8 +431,6 @@ void blk_integrity_unregister(struct gendisk *disk)
+ 	if (!bi->profile)
+ 		return;
+ 
+-	/* ensure all bios are off the integrity workqueue */
+-	blk_flush_integrity();
+ 	blk_queue_flag_clear(QUEUE_FLAG_STABLE_WRITES, disk->queue);
+ 	memset(bi, 0, sizeof(*bi));
+ }
+diff --git a/block/blk-iocost.c b/block/blk-iocost.c
+index 645a589..bfdb7b0 100644
+--- a/block/blk-iocost.c
++++ b/block/blk-iocost.c
+@@ -1336,7 +1336,7 @@ static bool iocg_kick_delay(struct ioc_gq *iocg, struct ioc_now *now)
+ {
+ 	struct ioc *ioc = iocg->ioc;
+ 	struct blkcg_gq *blkg = iocg_to_blkg(iocg);
+-	u64 tdelta, delay, new_delay;
++	u64 tdelta, delay, new_delay, shift;
+ 	s64 vover, vover_pct;
+ 	u32 hwa;
+ 
+@@ -1351,8 +1351,9 @@ static bool iocg_kick_delay(struct ioc_gq *iocg, struct ioc_now *now)
+ 
+ 	/* calculate the current delay in effect - 1/2 every second */
+ 	tdelta = now->now - iocg->delay_at;
+-	if (iocg->delay)
+-		delay = iocg->delay >> div64_u64(tdelta, USEC_PER_SEC);
++	shift = div64_u64(tdelta, USEC_PER_SEC);
++	if (iocg->delay && shift < BITS_PER_LONG)
++		delay = iocg->delay >> shift;
+ 	else
+ 		delay = 0;
+ 
+diff --git a/block/blk-mq.c b/block/blk-mq.c
+index 91e0948..a6103c2 100644
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -1724,6 +1724,14 @@ void blk_mq_delay_run_hw_queues(struct request_queue *q, unsigned long msecs)
+ 	queue_for_each_hw_ctx(q, hctx, i) {
+ 		if (blk_mq_hctx_stopped(hctx))
+ 			continue;
++		/*
++		 * If there is already a run_work pending, leave the
++		 * pending delay untouched. Otherwise, a hctx can stall
++		 * if another hctx is re-delaying the other's work
++		 * before the work executes.
++		 */
++		if (delayed_work_pending(&hctx->run_work))
++			continue;
+ 		/*
+ 		 * Dispatch from this hctx either if there's no hctx preferred
+ 		 * by IO scheduler or if it has requests that bypass the
+diff --git a/block/blk-settings.c b/block/blk-settings.c
+index 959b5c1..1b92e66 100644
+--- a/block/blk-settings.c
++++ b/block/blk-settings.c
+@@ -647,6 +647,10 @@ int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
+ 	t->zone_write_granularity = max(t->zone_write_granularity,
+ 					b->zone_write_granularity);
+ 	t->zoned = max(t->zoned, b->zoned);
++	if (!t->zoned) {
++		t->zone_write_granularity = 0;
++		t->max_zone_append_sectors = 0;
++	}
+ 	return ret;
+ }
+ EXPORT_SYMBOL(blk_stack_limits);
+diff --git a/block/blk-stat.c b/block/blk-stat.c
+index ae3dd1f..6e602f9 100644
+--- a/block/blk-stat.c
++++ b/block/blk-stat.c
+@@ -28,7 +28,7 @@ void blk_rq_stat_init(struct blk_rq_stat *stat)
+ /* src is a per-cpu stat, mean isn't initialized */
+ void blk_rq_stat_sum(struct blk_rq_stat *dst, struct blk_rq_stat *src)
+ {
+-	if (!src->nr_samples)
++	if (dst->nr_samples + src->nr_samples <= dst->nr_samples)
+ 		return;
+ 
+ 	dst->min = min(dst->min, src->min);
+diff --git a/block/ioctl.c b/block/ioctl.c
+index 7a939c1..a260e39 100644
+--- a/block/ioctl.c
++++ b/block/ioctl.c
+@@ -33,7 +33,7 @@ static int blkpg_do_ioctl(struct block_device *bdev,
+ 	if (op == BLKPG_DEL_PARTITION)
+ 		return bdev_del_partition(disk, p.pno);
+ 
+-	if (p.start < 0 || p.length <= 0 || p.start + p.length < 0)
++	if (p.start < 0 || p.length <= 0 || LLONG_MAX - p.length < p.start)
+ 		return -EINVAL;
+ 	/* Check that the partition is aligned to the block size */
+ 	if (!IS_ALIGNED(p.start | p.length, bdev_logical_block_size(bdev)))
+diff --git a/block/opal_proto.h b/block/opal_proto.h
+index b486b3e..a50191b 100644
+--- a/block/opal_proto.h
++++ b/block/opal_proto.h
+@@ -66,6 +66,7 @@ enum opal_response_token {
+ #define SHORT_ATOM_BYTE  0xBF
+ #define MEDIUM_ATOM_BYTE 0xDF
+ #define LONG_ATOM_BYTE   0xE3
++#define EMPTY_ATOM_BYTE  0xFF
+ 
+ #define OPAL_INVAL_PARAM 12
+ #define OPAL_MANUFACTURED_INACTIVE 0x08
+diff --git a/block/sed-opal.c b/block/sed-opal.c
+index 0ac5a4f..00e4d23 100644
+--- a/block/sed-opal.c
++++ b/block/sed-opal.c
+@@ -895,16 +895,20 @@ static int response_parse(const u8 *buf, size_t length,
+ 			token_length = response_parse_medium(iter, pos);
+ 		else if (pos[0] <= LONG_ATOM_BYTE) /* long atom */
+ 			token_length = response_parse_long(iter, pos);
++		else if (pos[0] == EMPTY_ATOM_BYTE) /* empty atom */
++			token_length = 1;
+ 		else /* TOKEN */
+ 			token_length = response_parse_token(iter, pos);
+ 
+ 		if (token_length < 0)
+ 			return token_length;
+ 
++		if (pos[0] != EMPTY_ATOM_BYTE)
++			num_entries++;
++
+ 		pos += token_length;
+ 		total -= token_length;
+ 		iter++;
+-		num_entries++;
+ 	}
+ 
+ 	resp->num = num_entries;

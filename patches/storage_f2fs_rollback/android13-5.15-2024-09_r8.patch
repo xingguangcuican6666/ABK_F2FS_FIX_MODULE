@@ -1,0 +1,178 @@
+diff --git a/fs/f2fs/checkpoint.c b/fs/f2fs/checkpoint.c
+index 22d215d..9bb0567 100644
+--- a/fs/f2fs/checkpoint.c
++++ b/fs/f2fs/checkpoint.c
+@@ -70,7 +70,7 @@ static struct page *__get_meta_page(struct f2fs_sb_info *sbi, pgoff_t index,
+ 		.old_blkaddr = index,
+ 		.new_blkaddr = index,
+ 		.encrypted_page = NULL,
+-		.is_por = !is_meta,
++		.is_por = !is_meta ? 1 : 0,
+ 	};
+ 	int err;
+ 
+@@ -234,8 +234,8 @@ int f2fs_ra_meta_pages(struct f2fs_sb_info *sbi, block_t start, int nrpages,
+ 		.op = REQ_OP_READ,
+ 		.op_flags = sync ? (REQ_META | REQ_PRIO) : REQ_RAHEAD,
+ 		.encrypted_page = NULL,
+-		.in_list = false,
+-		.is_por = (type == META_POR),
++		.in_list = 0,
++		.is_por = (type == META_POR) ? 1 : 0,
+ 	};
+ 	struct blk_plug plug;
+ 	int err;
+diff --git a/fs/f2fs/file.c b/fs/f2fs/file.c
+index 351d19d..5fb9ae7 100644
+--- a/fs/f2fs/file.c
++++ b/fs/f2fs/file.c
+@@ -3497,10 +3497,10 @@ out:
+ 	return ret;
+ }
+ 
+-static int reserve_compress_blocks(struct dnode_of_data *dn, pgoff_t count)
++static int reserve_compress_blocks(struct dnode_of_data *dn, pgoff_t count,
++		unsigned int *reserved_blocks)
+ {
+ 	struct f2fs_sb_info *sbi = F2FS_I_SB(dn->inode);
+-	unsigned int reserved_blocks = 0;
+ 	int cluster_size = F2FS_I(dn->inode)->i_cluster_size;
+ 	block_t blkaddr;
+ 	int i;
+@@ -3533,7 +3533,13 @@ static int reserve_compress_blocks(struct dnode_of_data *dn, pgoff_t count)
+ 				goto next;
+ 			}
+ 
+-			if (__is_valid_data_blkaddr(blkaddr)) {
++			/*
++			 * compressed cluster was not released due to it
++			 * fails in release_compress_blocks(), so NEW_ADDR
++			 * is a possible case.
++			 */
++			if (blkaddr == NEW_ADDR ||
++				__is_valid_data_blkaddr(blkaddr)) {
+ 				compr_blocks++;
+ 				continue;
+ 			}
+@@ -3543,6 +3549,11 @@ static int reserve_compress_blocks(struct dnode_of_data *dn, pgoff_t count)
+ 		}
+ 
+ 		reserved = cluster_size - compr_blocks;
++
++		/* for the case all blocks in cluster were reserved */
++		if (reserved == 1)
++			goto next;
++
+ 		ret = inc_valid_block_count(sbi, dn->inode, &reserved);
+ 		if (ret)
+ 			return ret;
+@@ -3552,12 +3563,12 @@ static int reserve_compress_blocks(struct dnode_of_data *dn, pgoff_t count)
+ 
+ 		f2fs_i_compr_blocks_update(dn->inode, compr_blocks, true);
+ 
+-		reserved_blocks += reserved;
++		*reserved_blocks += reserved;
+ next:
+ 		count -= cluster_size;
+ 	}
+ 
+-	return reserved_blocks;
++	return 0;
+ }
+ 
+ static int f2fs_reserve_compress_blocks(struct file *filp, unsigned long arg)
+@@ -3618,7 +3629,7 @@ static int f2fs_reserve_compress_blocks(struct file *filp, unsigned long arg)
+ 		count = min(end_offset - dn.ofs_in_node, last_idx - page_idx);
+ 		count = round_up(count, F2FS_I(inode)->i_cluster_size);
+ 
+-		ret = reserve_compress_blocks(&dn, count);
++		ret = reserve_compress_blocks(&dn, count, &reserved_blocks);
+ 
+ 		f2fs_put_dnode(&dn);
+ 
+@@ -3626,13 +3637,12 @@ static int f2fs_reserve_compress_blocks(struct file *filp, unsigned long arg)
+ 			break;
+ 
+ 		page_idx += count;
+-		reserved_blocks += ret;
+ 	}
+ 
+ 	filemap_invalidate_unlock(inode->i_mapping);
+ 	f2fs_up_write(&F2FS_I(inode)->i_gc_rwsem[WRITE]);
+ 
+-	if (ret >= 0) {
++	if (!ret) {
+ 		clear_inode_flag(inode, FI_COMPRESS_RELEASED);
+ 		inode->i_ctime = current_time(inode);
+ 		f2fs_mark_inode_dirty_sync(inode, true);
+@@ -3642,7 +3652,7 @@ unlock_inode:
+ out:
+ 	mnt_drop_write_file(filp);
+ 
+-	if (ret >= 0) {
++	if (!ret) {
+ 		ret = put_user(reserved_blocks, (u64 __user *)arg);
+ 	} else if (reserved_blocks &&
+ 			atomic_read(&F2FS_I(inode)->i_compr_blocks)) {
+diff --git a/fs/f2fs/gc.c b/fs/f2fs/gc.c
+index 9e78d2d..c29a704 100644
+--- a/fs/f2fs/gc.c
++++ b/fs/f2fs/gc.c
+@@ -1145,8 +1145,8 @@ static int ra_data_block(struct inode *inode, pgoff_t index)
+ 		.op = REQ_OP_READ,
+ 		.op_flags = 0,
+ 		.encrypted_page = NULL,
+-		.in_list = false,
+-		.retry = false,
++		.in_list = 0,
++		.retry = 0,
+ 	};
+ 	int err;
+ 
+@@ -1234,8 +1234,8 @@ static int move_data_block(struct inode *inode, block_t bidx,
+ 		.op = REQ_OP_READ,
+ 		.op_flags = 0,
+ 		.encrypted_page = NULL,
+-		.in_list = false,
+-		.retry = false,
++		.in_list = 0,
++		.retry = 0,
+ 	};
+ 	struct dnode_of_data dn;
+ 	struct f2fs_summary sum;
+diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
+index 87dc37f..9478fb8 100644
+--- a/fs/f2fs/node.c
++++ b/fs/f2fs/node.c
+@@ -1584,7 +1584,7 @@ static int __write_node_page(struct page *page, bool atomic, bool *submitted,
+ 		.op_flags = wbc_to_write_flags(wbc),
+ 		.page = page,
+ 		.encrypted_page = NULL,
+-		.submitted = false,
++		.submitted = 0,
+ 		.io_type = io_type,
+ 		.io_wbc = wbc,
+ 	};
+diff --git a/fs/f2fs/segment.c b/fs/f2fs/segment.c
+index 6b18dc1..1b54e74 100644
+--- a/fs/f2fs/segment.c
++++ b/fs/f2fs/segment.c
+@@ -2195,6 +2195,8 @@ static void update_sit_entry(struct f2fs_sb_info *sbi, block_t blkaddr, int del)
+ #endif
+ 
+ 	segno = GET_SEGNO(sbi, blkaddr);
++	if (segno == NULL_SEGNO)
++		return;
+ 
+ 	se = get_seg_entry(sbi, segno);
+ 	new_vblocks = se->valid_blocks + del;
+@@ -3428,8 +3430,7 @@ int f2fs_allocate_data_block(struct f2fs_sb_info *sbi, struct page *page,
+ 	 * since SSR needs latest valid block information.
+ 	 */
+ 	update_sit_entry(sbi, *new_blkaddr, 1);
+-	if (GET_SEGNO(sbi, old_blkaddr) != NULL_SEGNO)
+-		update_sit_entry(sbi, old_blkaddr, -1);
++	update_sit_entry(sbi, old_blkaddr, -1);
+ 
+ 	if (!__has_curseg_space(sbi, curseg)) {
+ 		if (from_gc)

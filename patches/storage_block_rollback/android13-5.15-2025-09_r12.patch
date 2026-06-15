@@ -1,0 +1,1078 @@
+diff --git a/block/Kconfig b/block/Kconfig
+index 8e28ae7..ee4c543 100644
+--- a/block/Kconfig
++++ b/block/Kconfig
+@@ -26,6 +26,16 @@ menuconfig BLOCK
+ 
+ if BLOCK
+ 
++config BLOCK_LEGACY_AUTOLOAD
++	bool "Legacy autoloading support"
++	default y
++	help
++	  Enable loading modules and creating block device instances based on
++	  accesses through their device special file.  This is a historic Linux
++	  feature and makes no sense in a udev world where device files are
++	  created on demand, but scripts that manually create device nodes and
++	  then call losetup might rely on this behavior.
++
+ config BLK_RQ_ALLOC_TIME
+ 	bool
+ 
+diff --git a/block/bdev.c b/block/bdev.c
+index b8599a4..ce7c20c 100644
+--- a/block/bdev.c
++++ b/block/bdev.c
+@@ -736,12 +736,15 @@ struct block_device *blkdev_get_no_open(dev_t dev)
+ 	struct inode *inode;
+ 
+ 	inode = ilookup(blockdev_superblock, dev);
+-	if (!inode) {
++	if (!inode && IS_ENABLED(CONFIG_BLOCK_LEGACY_AUTOLOAD)) {
+ 		blk_request_module(dev);
+ 		inode = ilookup(blockdev_superblock, dev);
+-		if (!inode)
+-			return NULL;
++		if (inode)
++			pr_warn_ratelimited(
++"block device autoloading is deprecated and will be removed.\n");
+ 	}
++	if (!inode)
++		return NULL;
+ 
+ 	/* switch from the inode reference to a device mode one: */
+ 	bdev = &BDEV_I(inode)->bdev;
+diff --git a/block/bfq-cgroup.c b/block/bfq-cgroup.c
+index 53e275e..d651bd8 100644
+--- a/block/bfq-cgroup.c
++++ b/block/bfq-cgroup.c
+@@ -463,7 +463,7 @@ static int bfqg_stats_init(struct bfqg_stats *stats, gfp_t gfp)
+ {
+ 	if (blkg_rwstat_init(&stats->bytes, gfp) ||
+ 	    blkg_rwstat_init(&stats->ios, gfp))
+-		return -ENOMEM;
++		goto error;
+ 
+ #ifdef CONFIG_BFQ_CGROUP_DEBUG
+ 	if (blkg_rwstat_init(&stats->merged, gfp) ||
+@@ -476,13 +476,15 @@ static int bfqg_stats_init(struct bfqg_stats *stats, gfp_t gfp)
+ 	    bfq_stat_init(&stats->dequeue, gfp) ||
+ 	    bfq_stat_init(&stats->group_wait_time, gfp) ||
+ 	    bfq_stat_init(&stats->idle_time, gfp) ||
+-	    bfq_stat_init(&stats->empty_time, gfp)) {
+-		bfqg_stats_exit(stats);
+-		return -ENOMEM;
+-	}
++	    bfq_stat_init(&stats->empty_time, gfp))
++		goto error;
+ #endif
+ 
+ 	return 0;
++
++error:
++	bfqg_stats_exit(stats);
++	return -ENOMEM;
+ }
+ 
+ static struct bfq_group_data *cpd_to_bfqgd(struct blkcg_policy_data *cpd)
+diff --git a/block/bfq-iosched.c b/block/bfq-iosched.c
+index e5fc6d1..7ded870 100644
+--- a/block/bfq-iosched.c
++++ b/block/bfq-iosched.c
+@@ -2754,8 +2754,12 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
+ 	struct bfq_queue *in_service_bfqq, *new_bfqq;
+ 
+ 	/* if a merge has already been setup, then proceed with that first */
+-	if (bfqq->new_bfqq)
+-		return bfqq->new_bfqq;
++	new_bfqq = bfqq->new_bfqq;
++	if (new_bfqq) {
++		while (new_bfqq->new_bfqq)
++			new_bfqq = new_bfqq->new_bfqq;
++		return new_bfqq;
++	}
+ 
+ 	/*
+ 	 * Check delayed stable merge for rotational or non-queueing
+@@ -2978,10 +2982,12 @@ void bfq_release_process_ref(struct bfq_data *bfqd, struct bfq_queue *bfqq)
+ 	bfq_put_queue(bfqq);
+ }
+ 
+-static void
+-bfq_merge_bfqqs(struct bfq_data *bfqd, struct bfq_io_cq *bic,
+-		struct bfq_queue *bfqq, struct bfq_queue *new_bfqq)
++static struct bfq_queue *bfq_merge_bfqqs(struct bfq_data *bfqd,
++					 struct bfq_io_cq *bic,
++					 struct bfq_queue *bfqq)
+ {
++	struct bfq_queue *new_bfqq = bfqq->new_bfqq;
++
+ 	bfq_log_bfqq(bfqd, bfqq, "merging with queue %lu",
+ 		(unsigned long)new_bfqq->pid);
+ 	/* Save weight raising and idle window of the merged queues */
+@@ -3075,6 +3081,8 @@ bfq_merge_bfqqs(struct bfq_data *bfqd, struct bfq_io_cq *bic,
+ 	bfq_reassign_last_bfqq(bfqq, new_bfqq);
+ 
+ 	bfq_release_process_ref(bfqd, bfqq);
++
++	return new_bfqq;
+ }
+ 
+ static bool bfq_allow_bio_merge(struct request_queue *q, struct request *rq,
+@@ -3110,14 +3118,8 @@ static bool bfq_allow_bio_merge(struct request_queue *q, struct request *rq,
+ 		 * fulfilled, i.e., bic can be redirected to new_bfqq
+ 		 * and bfqq can be put.
+ 		 */
+-		bfq_merge_bfqqs(bfqd, bfqd->bio_bic, bfqq,
+-				new_bfqq);
+-		/*
+-		 * If we get here, bio will be queued into new_queue,
+-		 * so use new_bfqq to decide whether bio and rq can be
+-		 * merged.
+-		 */
+-		bfqq = new_bfqq;
++		while (bfqq != new_bfqq)
++			bfqq = bfq_merge_bfqqs(bfqd, bfqd->bio_bic, bfqq);
+ 
+ 		/*
+ 		 * Change also bqfd->bio_bfqq, as
+@@ -5479,9 +5481,7 @@ bfq_do_early_stable_merge(struct bfq_data *bfqd, struct bfq_queue *bfqq,
+ 	 * state before killing it.
+ 	 */
+ 	bfqq->bic = bic;
+-	bfq_merge_bfqqs(bfqd, bic, bfqq, new_bfqq);
+-
+-	return new_bfqq;
++	return bfq_merge_bfqqs(bfqd, bic, bfqq);
+ }
+ 
+ /*
+@@ -5913,6 +5913,7 @@ static bool __bfq_insert_request(struct bfq_data *bfqd, struct request *rq)
+ 	bool waiting, idle_timer_disabled = false;
+ 
+ 	if (new_bfqq) {
++		struct bfq_queue *old_bfqq = bfqq;
+ 		/*
+ 		 * Release the request's reference to the old bfqq
+ 		 * and make sure one is taken to the shared queue.
+@@ -5928,18 +5929,18 @@ static bool __bfq_insert_request(struct bfq_data *bfqd, struct request *rq)
+ 		 * then complete the merge and redirect it to
+ 		 * new_bfqq.
+ 		 */
+-		if (bic_to_bfqq(RQ_BIC(rq), 1) == bfqq)
+-			bfq_merge_bfqqs(bfqd, RQ_BIC(rq),
+-					bfqq, new_bfqq);
++		if (bic_to_bfqq(RQ_BIC(rq), 1) == bfqq) {
++			while (bfqq != new_bfqq)
++				bfqq = bfq_merge_bfqqs(bfqd, RQ_BIC(rq), bfqq);
++		}
+ 
+-		bfq_clear_bfqq_just_created(bfqq);
++		bfq_clear_bfqq_just_created(old_bfqq);
+ 		/*
+ 		 * rq is about to be enqueued into new_bfqq,
+ 		 * release rq reference on bfqq
+ 		 */
+-		bfq_put_queue(bfqq);
++		bfq_put_queue(old_bfqq);
+ 		rq->elv.priv[1] = new_bfqq;
+-		bfqq = new_bfqq;
+ 	}
+ 
+ 	bfq_update_io_thinktime(bfqd, bfqq);
+@@ -6471,7 +6472,7 @@ bfq_split_bfqq(struct bfq_io_cq *bic, struct bfq_queue *bfqq)
+ {
+ 	bfq_log_bfqq(bfqq->bfqd, bfqq, "splitting queue");
+ 
+-	if (bfqq_process_refs(bfqq) == 1) {
++	if (bfqq_process_refs(bfqq) == 1 && !bfqq->new_bfqq) {
+ 		bfqq->pid = current->pid;
+ 		bfq_clear_bfqq_coop(bfqq);
+ 		bfq_clear_bfqq_split_coop(bfqq);
+@@ -6565,6 +6566,39 @@ static void bfq_prepare_request(struct request *rq)
+ 	rq->elv.priv[0] = rq->elv.priv[1] = NULL;
+ }
+ 
++static struct bfq_queue *bfq_waker_bfqq(struct bfq_queue *bfqq)
++{
++	struct bfq_queue *new_bfqq = bfqq->new_bfqq;
++	struct bfq_queue *waker_bfqq = bfqq->waker_bfqq;
++
++	if (!waker_bfqq)
++		return NULL;
++
++	while (new_bfqq) {
++		if (new_bfqq == waker_bfqq) {
++			/*
++			 * If waker_bfqq is in the merge chain, and current
++			 * is the only process, waker_bfqq can be freed.
++			 */
++			if (bfqq_process_refs(waker_bfqq) == 1)
++				return NULL;
++
++			return waker_bfqq;
++		}
++
++		new_bfqq = new_bfqq->new_bfqq;
++	}
++
++	/*
++	 * If waker_bfqq is not in the merge chain, and it's procress reference
++	 * is 0, waker_bfqq can be freed.
++	 */
++	if (bfqq_process_refs(waker_bfqq) == 0)
++		return NULL;
++
++	return waker_bfqq;
++}
++
+ /*
+  * If needed, init rq, allocate bfq data structures associated with
+  * rq, and increment reference counters in the destination bfq_queue
+@@ -6625,7 +6659,7 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
+ 		/* If the queue was seeky for too long, break it apart. */
+ 		if (bfq_bfqq_coop(bfqq) && bfq_bfqq_split_coop(bfqq) &&
+ 			!bic->stably_merged) {
+-			struct bfq_queue *old_bfqq = bfqq;
++			struct bfq_queue *waker_bfqq = bfq_waker_bfqq(bfqq);
+ 
+ 			/* Update bic before losing reference to bfqq */
+ 			if (bfq_bfqq_in_large_burst(bfqq))
+@@ -6644,7 +6678,7 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
+ 				bfqq_already_existing = true;
+ 
+ 			if (!bfqq_already_existing) {
+-				bfqq->waker_bfqq = old_bfqq->waker_bfqq;
++				bfqq->waker_bfqq = waker_bfqq;
+ 				bfqq->tentative_waker_bfqq = NULL;
+ 
+ 				/*
+@@ -6654,7 +6688,7 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
+ 				 * woken_list of the waker. See
+ 				 * bfq_check_waker for details.
+ 				 */
+-				if (bfqq->waker_bfqq)
++				if (waker_bfqq)
+ 					hlist_add_head(&bfqq->woken_list_node,
+ 						       &bfqq->waker_bfqq->woken_list);
+ 			}
+@@ -6676,7 +6710,8 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
+ 	 * addition, if the queue has also just been split, we have to
+ 	 * resume its state.
+ 	 */
+-	if (likely(bfqq != &bfqd->oom_bfqq) && bfqq_process_refs(bfqq) == 1) {
++	if (likely(bfqq != &bfqd->oom_bfqq) && !bfqq->new_bfqq &&
++	    bfqq_process_refs(bfqq) == 1) {
+ 		bfqq->bic = bic;
+ 		if (split) {
+ 			/*
+diff --git a/block/bio-integrity.c b/block/bio-integrity.c
+index 4f34ac2..bb364a2 100644
+--- a/block/bio-integrity.c
++++ b/block/bio-integrity.c
+@@ -203,8 +203,7 @@ bool bio_integrity_prep(struct bio *bio)
+ 	unsigned long start, end;
+ 	unsigned int len, nr_pages;
+ 	unsigned int bytes, offset, i;
+-	unsigned int intervals;
+-	blk_status_t status;
++	gfp_t gfp = GFP_NOIO;
+ 
+ 	if (!bi)
+ 		return true;
+@@ -227,13 +226,19 @@ bool bio_integrity_prep(struct bio *bio)
+ 		if (!bi->profile->generate_fn ||
+ 		    !(bi->flags & BLK_INTEGRITY_GENERATE))
+ 			return true;
++
++		/*
++		 * Zero the memory allocated to not leak uninitialized kernel
++		 * memory to disk.  For PI this only affects the app tag, but
++		 * for non-integrity metadata it affects the entire metadata
++		 * buffer.
++		 */
++		gfp |= __GFP_ZERO;
+ 	}
+-	intervals = bio_integrity_intervals(bi, bio_sectors(bio));
+ 
+ 	/* Allocate kernel buffer for protection data */
+-	len = intervals * bi->tuple_size;
+-	buf = kmalloc(len, GFP_NOIO);
+-	status = BLK_STS_RESOURCE;
++	len = bio_integrity_bytes(bi, bio_sectors(bio));
++	buf = kmalloc(len, gfp);
+ 	if (unlikely(buf == NULL)) {
+ 		printk(KERN_ERR "could not allocate integrity buffer\n");
+ 		goto err_end_io;
+@@ -248,7 +253,6 @@ bool bio_integrity_prep(struct bio *bio)
+ 	if (IS_ERR(bip)) {
+ 		printk(KERN_ERR "could not allocate data integrity bioset\n");
+ 		kfree(buf);
+-		status = BLK_STS_RESOURCE;
+ 		goto err_end_io;
+ 	}
+ 
+@@ -276,7 +280,6 @@ bool bio_integrity_prep(struct bio *bio)
+ 
+ 		if (ret == 0) {
+ 			printk(KERN_ERR "could not attach integrity payload\n");
+-			status = BLK_STS_RESOURCE;
+ 			goto err_end_io;
+ 		}
+ 
+@@ -298,7 +301,7 @@ bool bio_integrity_prep(struct bio *bio)
+ 	return true;
+ 
+ err_end_io:
+-	bio->bi_status = status;
++	bio->bi_status = BLK_STS_RESOURCE;
+ 	bio_endio(bio);
+ 	return false;
+ 
+diff --git a/block/bio.c b/block/bio.c
+index 28efa1a..ea40aa8 100644
+--- a/block/bio.c
++++ b/block/bio.c
+@@ -73,7 +73,7 @@ struct bio_slab {
+ 	struct kmem_cache *slab;
+ 	unsigned int slab_ref;
+ 	unsigned int slab_size;
+-	char name[8];
++	char name[12];
+ };
+ static DEFINE_MUTEX(bio_slab_lock);
+ static DEFINE_XARRAY(bio_slabs);
+diff --git a/block/blk-cgroup.c b/block/blk-cgroup.c
+index c60ea0e..02f135c 100644
+--- a/block/blk-cgroup.c
++++ b/block/blk-cgroup.c
+@@ -894,6 +894,7 @@ static void blkcg_fill_root_iostats(void)
+ 		blkg_iostat_set(&blkg->iostat.cur, &tmp);
+ 		u64_stats_update_end_irqrestore(&blkg->iostat.sync, flags);
+ 	}
++	class_dev_iter_exit(&iter);
+ }
+ 
+ static void blkcg_print_one_stat(struct blkcg_gq *blkg, struct seq_file *s)
+diff --git a/block/blk-integrity.c b/block/blk-integrity.c
+index 16d5d53..fbbb38c 100644
+--- a/block/blk-integrity.c
++++ b/block/blk-integrity.c
+@@ -212,61 +212,44 @@ bool blk_integrity_merge_bio(struct request_queue *q, struct request *req,
+ 	return true;
+ }
+ 
+-struct integrity_sysfs_entry {
+-	struct attribute attr;
+-	ssize_t (*show)(struct blk_integrity *, char *);
+-	ssize_t (*store)(struct blk_integrity *, const char *, size_t);
+-};
+-
+-static ssize_t integrity_attr_show(struct kobject *kobj, struct attribute *attr,
+-				   char *page)
++static inline struct blk_integrity *dev_to_bi(struct device *dev)
+ {
+-	struct gendisk *disk = container_of(kobj, struct gendisk, integrity_kobj);
+-	struct blk_integrity *bi = &disk->queue->integrity;
+-	struct integrity_sysfs_entry *entry =
+-		container_of(attr, struct integrity_sysfs_entry, attr);
+-
+-	return entry->show(bi, page);
++	return &dev_to_disk(dev)->queue->integrity;
+ }
+ 
+-static ssize_t integrity_attr_store(struct kobject *kobj,
+-				    struct attribute *attr, const char *page,
+-				    size_t count)
++static ssize_t format_show(struct device *dev, struct device_attribute *attr,
++			   char *page)
+ {
+-	struct gendisk *disk = container_of(kobj, struct gendisk, integrity_kobj);
+-	struct blk_integrity *bi = &disk->queue->integrity;
+-	struct integrity_sysfs_entry *entry =
+-		container_of(attr, struct integrity_sysfs_entry, attr);
+-	ssize_t ret = 0;
++	struct blk_integrity *bi = dev_to_bi(dev);
+ 
+-	if (entry->store)
+-		ret = entry->store(bi, page, count);
+-
+-	return ret;
+-}
+-
+-static ssize_t integrity_format_show(struct blk_integrity *bi, char *page)
+-{
+ 	if (bi->profile && bi->profile->name)
+-		return sprintf(page, "%s\n", bi->profile->name);
+-	else
+-		return sprintf(page, "none\n");
++		return sysfs_emit(page, "%s\n", bi->profile->name);
++	return sysfs_emit(page, "none\n");
+ }
+ 
+-static ssize_t integrity_tag_size_show(struct blk_integrity *bi, char *page)
++static ssize_t tag_size_show(struct device *dev, struct device_attribute *attr,
++			     char *page)
+ {
+-	return sprintf(page, "%u\n", bi->tag_size);
++	struct blk_integrity *bi = dev_to_bi(dev);
++
++	return sysfs_emit(page, "%u\n", bi->tag_size);
+ }
+ 
+-static ssize_t integrity_interval_show(struct blk_integrity *bi, char *page)
++static ssize_t protection_interval_bytes_show(struct device *dev,
++					      struct device_attribute *attr,
++					      char *page)
+ {
+-	return sprintf(page, "%u\n",
+-		       bi->interval_exp ? 1 << bi->interval_exp : 0);
++	struct blk_integrity *bi = dev_to_bi(dev);
++
++	return sysfs_emit(page, "%u\n",
++			  bi->interval_exp ? 1 << bi->interval_exp : 0);
+ }
+ 
+-static ssize_t integrity_verify_store(struct blk_integrity *bi,
+-				      const char *page, size_t count)
++static ssize_t read_verify_store(struct device *dev,
++				 struct device_attribute *attr,
++				 const char *page, size_t count)
+ {
++	struct blk_integrity *bi = dev_to_bi(dev);
+ 	char *p = (char *) page;
+ 	unsigned long val = simple_strtoul(p, &p, 10);
+ 
+@@ -278,14 +261,20 @@ static ssize_t integrity_verify_store(struct blk_integrity *bi,
+ 	return count;
+ }
+ 
+-static ssize_t integrity_verify_show(struct blk_integrity *bi, char *page)
++static ssize_t read_verify_show(struct device *dev,
++				struct device_attribute *attr, char *page)
+ {
+-	return sprintf(page, "%d\n", (bi->flags & BLK_INTEGRITY_VERIFY) != 0);
++	struct blk_integrity *bi = dev_to_bi(dev);
++
++	return sysfs_emit(page, "%d\n", !!(bi->flags & BLK_INTEGRITY_VERIFY));
+ }
+ 
+-static ssize_t integrity_generate_store(struct blk_integrity *bi,
+-					const char *page, size_t count)
++static ssize_t write_generate_store(struct device *dev,
++				    struct device_attribute *attr,
++				    const char *page, size_t count)
+ {
++	struct blk_integrity *bi = dev_to_bi(dev);
++
+ 	char *p = (char *) page;
+ 	unsigned long val = simple_strtoul(p, &p, 10);
+ 
+@@ -297,68 +286,44 @@ static ssize_t integrity_generate_store(struct blk_integrity *bi,
+ 	return count;
+ }
+ 
+-static ssize_t integrity_generate_show(struct blk_integrity *bi, char *page)
++static ssize_t write_generate_show(struct device *dev,
++				   struct device_attribute *attr, char *page)
+ {
+-	return sprintf(page, "%d\n", (bi->flags & BLK_INTEGRITY_GENERATE) != 0);
+-}
++	struct blk_integrity *bi = dev_to_bi(dev);
+ 
+-static ssize_t integrity_device_show(struct blk_integrity *bi, char *page)
+-{
+-	return sprintf(page, "%u\n",
+-		       (bi->flags & BLK_INTEGRITY_DEVICE_CAPABLE) != 0);
++	return sysfs_emit(page, "%d\n", !!(bi->flags & BLK_INTEGRITY_GENERATE));
+ }
+ 
+-static struct integrity_sysfs_entry integrity_format_entry = {
+-	.attr = { .name = "format", .mode = 0444 },
+-	.show = integrity_format_show,
+-};
+-
+-static struct integrity_sysfs_entry integrity_tag_size_entry = {
+-	.attr = { .name = "tag_size", .mode = 0444 },
+-	.show = integrity_tag_size_show,
+-};
+-
+-static struct integrity_sysfs_entry integrity_interval_entry = {
+-	.attr = { .name = "protection_interval_bytes", .mode = 0444 },
+-	.show = integrity_interval_show,
+-};
+-
+-static struct integrity_sysfs_entry integrity_verify_entry = {
+-	.attr = { .name = "read_verify", .mode = 0644 },
+-	.show = integrity_verify_show,
+-	.store = integrity_verify_store,
+-};
++static ssize_t device_is_integrity_capable_show(struct device *dev,
++						struct device_attribute *attr,
++						char *page)
++{
++	struct blk_integrity *bi = dev_to_bi(dev);
+ 
+-static struct integrity_sysfs_entry integrity_generate_entry = {
+-	.attr = { .name = "write_generate", .mode = 0644 },
+-	.show = integrity_generate_show,
+-	.store = integrity_generate_store,
+-};
++	return sysfs_emit(page, "%u\n",
++			  !!(bi->flags & BLK_INTEGRITY_DEVICE_CAPABLE));
++}
+ 
+-static struct integrity_sysfs_entry integrity_device_entry = {
+-	.attr = { .name = "device_is_integrity_capable", .mode = 0444 },
+-	.show = integrity_device_show,
+-};
++static DEVICE_ATTR_RO(format);
++static DEVICE_ATTR_RO(tag_size);
++static DEVICE_ATTR_RO(protection_interval_bytes);
++static DEVICE_ATTR_RW(read_verify);
++static DEVICE_ATTR_RW(write_generate);
++static DEVICE_ATTR_RO(device_is_integrity_capable);
+ 
+ static struct attribute *integrity_attrs[] = {
+-	&integrity_format_entry.attr,
+-	&integrity_tag_size_entry.attr,
+-	&integrity_interval_entry.attr,
+-	&integrity_verify_entry.attr,
+-	&integrity_generate_entry.attr,
+-	&integrity_device_entry.attr,
+-	NULL,
++	&dev_attr_format.attr,
++	&dev_attr_tag_size.attr,
++	&dev_attr_protection_interval_bytes.attr,
++	&dev_attr_read_verify.attr,
++	&dev_attr_write_generate.attr,
++	&dev_attr_device_is_integrity_capable.attr,
++	NULL
+ };
+-ATTRIBUTE_GROUPS(integrity);
+ 
+-static const struct sysfs_ops integrity_ops = {
+-	.show	= &integrity_attr_show,
+-	.store	= &integrity_attr_store,
+-};
+-
+-static struct kobj_type integrity_ktype = {
+-	.default_groups = integrity_groups,
+-	.sysfs_ops	= &integrity_ops,
++const struct attribute_group blk_integrity_attr_group = {
++	.name = "integrity",
++	.attrs = integrity_attrs,
+ };
+ 
+ static blk_status_t blk_integrity_nop_fn(struct blk_integrity_iter *iter)
+@@ -431,27 +396,7 @@ void blk_integrity_unregister(struct gendisk *disk)
+ 	if (!bi->profile)
+ 		return;
+ 
+-	/* ensure all bios are off the integrity workqueue */
+-	blk_flush_integrity();
+ 	blk_queue_flag_clear(QUEUE_FLAG_STABLE_WRITES, disk->queue);
+ 	memset(bi, 0, sizeof(*bi));
+ }
+ EXPORT_SYMBOL(blk_integrity_unregister);
+-
+-int blk_integrity_add(struct gendisk *disk)
+-{
+-	int ret;
+-
+-	ret = kobject_init_and_add(&disk->integrity_kobj, &integrity_ktype,
+-				   &disk_to_dev(disk)->kobj, "%s", "integrity");
+-	if (!ret)
+-		kobject_uevent(&disk->integrity_kobj, KOBJ_ADD);
+-	return ret;
+-}
+-
+-void blk_integrity_del(struct gendisk *disk)
+-{
+-	kobject_uevent(&disk->integrity_kobj, KOBJ_REMOVE);
+-	kobject_del(&disk->integrity_kobj);
+-	kobject_put(&disk->integrity_kobj);
+-}
+diff --git a/block/blk-iocost.c b/block/blk-iocost.c
+index 645a589..ba23562 100644
+--- a/block/blk-iocost.c
++++ b/block/blk-iocost.c
+@@ -1087,7 +1087,14 @@ static void __propagate_weights(struct ioc_gq *iocg, u32 active, u32 inuse,
+ 		inuse = DIV64_U64_ROUND_UP(active * iocg->child_inuse_sum,
+ 					   iocg->child_active_sum);
+ 	} else {
+-		inuse = clamp_t(u32, inuse, 1, active);
++		/*
++		 * It may be tempting to turn this into a clamp expression with
++		 * a lower limit of 1 but active may be 0, which cannot be used
++		 * as an upper limit in that situation. This expression allows
++		 * active to clamp inuse unless it is 0, in which case inuse
++		 * becomes 1.
++		 */
++		inuse = min(inuse, active) ?: 1;
+ 	}
+ 
+ 	iocg->last_inuse = iocg->inuse;
+@@ -1336,7 +1343,7 @@ static bool iocg_kick_delay(struct ioc_gq *iocg, struct ioc_now *now)
+ {
+ 	struct ioc *ioc = iocg->ioc;
+ 	struct blkcg_gq *blkg = iocg_to_blkg(iocg);
+-	u64 tdelta, delay, new_delay;
++	u64 tdelta, delay, new_delay, shift;
+ 	s64 vover, vover_pct;
+ 	u32 hwa;
+ 
+@@ -1351,8 +1358,9 @@ static bool iocg_kick_delay(struct ioc_gq *iocg, struct ioc_now *now)
+ 
+ 	/* calculate the current delay in effect - 1/2 every second */
+ 	tdelta = now->now - iocg->delay_at;
+-	if (iocg->delay)
+-		delay = iocg->delay >> div64_u64(tdelta, USEC_PER_SEC);
++	shift = div64_u64(tdelta, USEC_PER_SEC);
++	if (iocg->delay && shift < BITS_PER_LONG)
++		delay = iocg->delay >> shift;
+ 	else
+ 		delay = 0;
+ 
+@@ -2067,7 +2075,7 @@ static void ioc_forgive_debts(struct ioc *ioc, u64 usage_us_sum, int nr_debtors,
+ 			      struct ioc_now *now)
+ {
+ 	struct ioc_gq *iocg;
+-	u64 dur, usage_pct, nr_cycles;
++	u64 dur, usage_pct, nr_cycles, nr_cycles_shift;
+ 
+ 	/* if no debtor, reset the cycle */
+ 	if (!nr_debtors) {
+@@ -2129,10 +2137,12 @@ static void ioc_forgive_debts(struct ioc *ioc, u64 usage_us_sum, int nr_debtors,
+ 		old_debt = iocg->abs_vdebt;
+ 		old_delay = iocg->delay;
+ 
++		nr_cycles_shift = min_t(u64, nr_cycles, BITS_PER_LONG - 1);
+ 		if (iocg->abs_vdebt)
+-			iocg->abs_vdebt = iocg->abs_vdebt >> nr_cycles ?: 1;
++			iocg->abs_vdebt = iocg->abs_vdebt >> nr_cycles_shift ?: 1;
++
+ 		if (iocg->delay)
+-			iocg->delay = iocg->delay >> nr_cycles ?: 1;
++			iocg->delay = iocg->delay >> nr_cycles_shift ?: 1;
+ 
+ 		iocg_kick_waitq(iocg, true, now);
+ 
+diff --git a/block/blk-mq.c b/block/blk-mq.c
+index 91e0948..68d69ee 100644
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -1724,6 +1724,14 @@ void blk_mq_delay_run_hw_queues(struct request_queue *q, unsigned long msecs)
+ 	queue_for_each_hw_ctx(q, hctx, i) {
+ 		if (blk_mq_hctx_stopped(hctx))
+ 			continue;
++		/*
++		 * If there is already a run_work pending, leave the
++		 * pending delay untouched. Otherwise, a hctx can stall
++		 * if another hctx is re-delaying the other's work
++		 * before the work executes.
++		 */
++		if (delayed_work_pending(&hctx->run_work))
++			continue;
+ 		/*
+ 		 * Dispatch from this hctx either if there's no hctx preferred
+ 		 * by IO scheduler or if it has requests that bypass the
+@@ -1816,6 +1824,12 @@ void blk_mq_start_stopped_hw_queue(struct blk_mq_hw_ctx *hctx, bool async)
+ 		return;
+ 
+ 	clear_bit(BLK_MQ_S_STOPPED, &hctx->state);
++	/*
++	 * Pairs with the smp_mb() in blk_mq_hctx_stopped() to order the
++	 * clearing of BLK_MQ_S_STOPPED above and the checking of dispatch
++	 * list in the subsequent routine.
++	 */
++	smp_mb__after_atomic();
+ 	blk_mq_run_hw_queue(hctx, async);
+ }
+ EXPORT_SYMBOL_GPL(blk_mq_start_stopped_hw_queue);
+diff --git a/block/blk-mq.h b/block/blk-mq.h
+index f302e9c..f66f838 100644
+--- a/block/blk-mq.h
++++ b/block/blk-mq.h
+@@ -179,6 +179,19 @@ static inline struct blk_mq_tags *blk_mq_tags_from_data(struct blk_mq_alloc_data
+ 
+ static inline bool blk_mq_hctx_stopped(struct blk_mq_hw_ctx *hctx)
+ {
++	/* Fast path: hardware queue is not stopped most of the time. */
++	if (likely(!test_bit(BLK_MQ_S_STOPPED, &hctx->state)))
++		return false;
++
++	/*
++	 * This barrier is used to order adding of dispatch list before and
++	 * the test of BLK_MQ_S_STOPPED below. Pairs with the memory barrier
++	 * in blk_mq_start_stopped_hw_queue() so that dispatch code could
++	 * either see BLK_MQ_S_STOPPED is cleared or dispatch list is not
++	 * empty to avoid missing dispatching requests.
++	 */
++	smp_mb();
++
+ 	return test_bit(BLK_MQ_S_STOPPED, &hctx->state);
+ }
+ 
+diff --git a/block/blk-rq-qos.c b/block/blk-rq-qos.c
+index e83af7b..26dd3e7 100644
+--- a/block/blk-rq-qos.c
++++ b/block/blk-rq-qos.c
+@@ -225,8 +225,8 @@ static int rq_qos_wake_function(struct wait_queue_entry *curr,
+ 
+ 	data->got_token = true;
+ 	smp_wmb();
+-	list_del_init(&curr->entry);
+ 	wake_up_process(data->task);
++	list_del_init_careful(&curr->entry);
+ 	return 1;
+ }
+ 
+diff --git a/block/blk-settings.c b/block/blk-settings.c
+index 959b5c1..1b92e66 100644
+--- a/block/blk-settings.c
++++ b/block/blk-settings.c
+@@ -647,6 +647,10 @@ int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
+ 	t->zone_write_granularity = max(t->zone_write_granularity,
+ 					b->zone_write_granularity);
+ 	t->zoned = max(t->zoned, b->zoned);
++	if (!t->zoned) {
++		t->zone_write_granularity = 0;
++		t->max_zone_append_sectors = 0;
++	}
+ 	return ret;
+ }
+ EXPORT_SYMBOL(blk_stack_limits);
+diff --git a/block/blk-stat.c b/block/blk-stat.c
+index ae3dd1f..6e602f9 100644
+--- a/block/blk-stat.c
++++ b/block/blk-stat.c
+@@ -28,7 +28,7 @@ void blk_rq_stat_init(struct blk_rq_stat *stat)
+ /* src is a per-cpu stat, mean isn't initialized */
+ void blk_rq_stat_sum(struct blk_rq_stat *dst, struct blk_rq_stat *src)
+ {
+-	if (!src->nr_samples)
++	if (dst->nr_samples + src->nr_samples <= dst->nr_samples)
+ 		return;
+ 
+ 	dst->min = min(dst->min, src->min);
+diff --git a/block/blk.h b/block/blk.h
+index aab7219..e90a5e3 100644
+--- a/block/blk.h
++++ b/block/blk.h
+@@ -130,8 +130,7 @@ static inline bool integrity_req_gap_front_merge(struct request *req,
+ 				bip_next->bip_vec[0].bv_offset);
+ }
+ 
+-int blk_integrity_add(struct gendisk *disk);
+-void blk_integrity_del(struct gendisk *);
++extern const struct attribute_group blk_integrity_attr_group;
+ #else /* CONFIG_BLK_DEV_INTEGRITY */
+ static inline bool blk_integrity_merge_rq(struct request_queue *rq,
+ 		struct request *r1, struct request *r2)
+@@ -164,13 +163,6 @@ static inline bool bio_integrity_endio(struct bio *bio)
+ static inline void bio_integrity_free(struct bio *bio)
+ {
+ }
+-static inline int blk_integrity_add(struct gendisk *disk)
+-{
+-	return 0;
+-}
+-static inline void blk_integrity_del(struct gendisk *disk)
+-{
+-}
+ #endif /* CONFIG_BLK_DEV_INTEGRITY */
+ 
+ unsigned long blk_rq_timeout(unsigned long timeout);
+diff --git a/block/elevator.c b/block/elevator.c
+index 1b5e57f..a98e835 100644
+--- a/block/elevator.c
++++ b/block/elevator.c
+@@ -620,7 +620,7 @@ out:
+ static inline bool elv_support_iosched(struct request_queue *q)
+ {
+ 	if (!queue_is_mq(q) ||
+-	    (q->tag_set && (q->tag_set->flags & BLK_MQ_F_NO_SCHED)))
++	    (q->tag_set->flags & BLK_MQ_F_NO_SCHED))
+ 		return false;
+ 	return true;
+ }
+@@ -631,7 +631,7 @@ static inline bool elv_support_iosched(struct request_queue *q)
+  */
+ static struct elevator_type *elevator_get_default(struct request_queue *q)
+ {
+-	if (q->tag_set && q->tag_set->flags & BLK_MQ_F_NO_SCHED_BY_DEFAULT)
++	if (q->tag_set->flags & BLK_MQ_F_NO_SCHED_BY_DEFAULT)
+ 		return NULL;
+ 
+ 	if (q->nr_hw_queues != 1 &&
+diff --git a/block/fops.c b/block/fops.c
+index 4c89489..72da501 100644
+--- a/block/fops.c
++++ b/block/fops.c
+@@ -259,7 +259,6 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
+ 				blk_finish_plug(&plug);
+ 				return -EAGAIN;
+ 			}
+-			bio->bi_opf |= REQ_NOWAIT;
+ 		}
+ 
+ 		if (is_read) {
+@@ -270,6 +269,10 @@ static ssize_t __blkdev_direct_IO(struct kiocb *iocb, struct iov_iter *iter,
+ 			bio->bi_opf = dio_bio_write_op(iocb);
+ 			task_io_account_write(bio->bi_iter.bi_size);
+ 		}
++
++		if (iocb->ki_flags & IOCB_NOWAIT)
++			bio->bi_opf |= REQ_NOWAIT;
++
+ 		dio->size += bio->bi_iter.bi_size;
+ 		pos += bio->bi_iter.bi_size;
+ 
+diff --git a/block/genhd.c b/block/genhd.c
+index 4d28f1d..421e027 100644
+--- a/block/genhd.c
++++ b/block/genhd.c
+@@ -182,7 +182,9 @@ static struct blk_major_name {
+ 	struct blk_major_name *next;
+ 	int major;
+ 	char name[16];
++#ifdef CONFIG_BLOCK_LEGACY_AUTOLOAD
+ 	void (*probe)(dev_t devt);
++#endif
+ } *major_names[BLKDEV_MAJOR_HASH_SIZE];
+ static DEFINE_MUTEX(major_names_lock);
+ static DEFINE_SPINLOCK(major_names_spinlock);
+@@ -269,7 +271,9 @@ int __register_blkdev(unsigned int major, const char *name,
+ 	}
+ 
+ 	p->major = major;
++#ifdef CONFIG_BLOCK_LEGACY_AUTOLOAD
+ 	p->probe = probe;
++#endif
+ 	strlcpy(p->name, name, sizeof(p->name));
+ 	p->next = NULL;
+ 	index = major_to_index(major);
+@@ -467,15 +471,11 @@ int device_add_disk(struct device *parent, struct gendisk *disk,
+ 	 */
+ 	pm_runtime_set_memalloc_noio(ddev, true);
+ 
+-	ret = blk_integrity_add(disk);
+-	if (ret)
+-		goto out_del_block_link;
+-
+ 	disk->part0->bd_holder_dir =
+ 		kobject_create_and_add("holders", &ddev->kobj);
+ 	if (!disk->part0->bd_holder_dir) {
+ 		ret = -ENOMEM;
+-		goto out_del_integrity;
++		goto out_del_block_link;
+ 	}
+ 	disk->slave_dir = kobject_create_and_add("slaves", &ddev->kobj);
+ 	if (!disk->slave_dir) {
+@@ -535,8 +535,6 @@ out_put_slave_dir:
+ 	disk->slave_dir = NULL;
+ out_put_holder_dir:
+ 	kobject_put(disk->part0->bd_holder_dir);
+-out_del_integrity:
+-	blk_integrity_del(disk);
+ out_del_block_link:
+ 	if (!sysfs_deprecated)
+ 		sysfs_remove_link(block_depr, dev_name(ddev));
+@@ -592,7 +590,6 @@ void del_gendisk(struct gendisk *disk)
+ 	if (WARN_ON_ONCE(!disk_live(disk) && !(disk->flags & GENHD_FL_HIDDEN)))
+ 		return;
+ 
+-	blk_integrity_del(disk);
+ 	disk_del_events(disk);
+ 
+ 	mutex_lock(&disk->open_mutex);
+@@ -676,7 +673,8 @@ static ssize_t disk_badblocks_store(struct device *dev,
+ 	return badblocks_store(disk->bb, page, len, 0);
+ }
+ 
+-void blk_request_module(dev_t devt)
++#ifdef CONFIG_BLOCK_LEGACY_AUTOLOAD
++static bool blk_probe_dev(dev_t devt)
+ {
+ 	unsigned int major = MAJOR(devt);
+ 	struct blk_major_name **n;
+@@ -686,15 +684,28 @@ void blk_request_module(dev_t devt)
+ 		if ((*n)->major == major && (*n)->probe) {
+ 			(*n)->probe(devt);
+ 			mutex_unlock(&major_names_lock);
+-			return;
++			return true;
+ 		}
+ 	}
+ 	mutex_unlock(&major_names_lock);
++	return false;
++}
++
++void blk_request_module(dev_t devt)
++{
++	int error;
++
++	if (blk_probe_dev(devt))
++		return;
+ 
+-	if (request_module("block-major-%d-%d", MAJOR(devt), MINOR(devt)) > 0)
+-		/* Make old-style 2.4 aliases work */
+-		request_module("block-major-%d", MAJOR(devt));
++	error = request_module("block-major-%d-%d", MAJOR(devt), MINOR(devt));
++	/* Make old-style 2.4 aliases work */
++	if (error > 0)
++		error = request_module("block-major-%d", MAJOR(devt));
++	if (!error)
++		blk_probe_dev(devt);
+ }
++#endif /* CONFIG_BLOCK_LEGACY_AUTOLOAD */
+ 
+ /*
+  * print a full list of all partitions - intended for places where the root
+@@ -1084,6 +1095,9 @@ static struct attribute_group disk_attr_group = {
+ 
+ static const struct attribute_group *disk_attr_groups[] = {
+ 	&disk_attr_group,
++#ifdef CONFIG_BLK_DEV_INTEGRITY
++	&blk_integrity_attr_group,
++#endif
+ 	NULL
+ };
+ 
+diff --git a/block/ioctl.c b/block/ioctl.c
+index 7a939c1..a260e39 100644
+--- a/block/ioctl.c
++++ b/block/ioctl.c
+@@ -33,7 +33,7 @@ static int blkpg_do_ioctl(struct block_device *bdev,
+ 	if (op == BLKPG_DEL_PARTITION)
+ 		return bdev_del_partition(disk, p.pno);
+ 
+-	if (p.start < 0 || p.length <= 0 || p.start + p.length < 0)
++	if (p.start < 0 || p.length <= 0 || LLONG_MAX - p.length < p.start)
+ 		return -EINVAL;
+ 	/* Check that the partition is aligned to the block size */
+ 	if (!IS_ALIGNED(p.start | p.length, bdev_logical_block_size(bdev)))
+diff --git a/block/opal_proto.h b/block/opal_proto.h
+index b486b3e..a50191b 100644
+--- a/block/opal_proto.h
++++ b/block/opal_proto.h
+@@ -66,6 +66,7 @@ enum opal_response_token {
+ #define SHORT_ATOM_BYTE  0xBF
+ #define MEDIUM_ATOM_BYTE 0xDF
+ #define LONG_ATOM_BYTE   0xE3
++#define EMPTY_ATOM_BYTE  0xFF
+ 
+ #define OPAL_INVAL_PARAM 12
+ #define OPAL_MANUFACTURED_INACTIVE 0x08
+diff --git a/block/partitions/core.c b/block/partitions/core.c
+index b6a9418..0d1fe2b 100644
+--- a/block/partitions/core.c
++++ b/block/partitions/core.c
+@@ -590,9 +590,11 @@ static bool blk_add_partition(struct gendisk *disk,
+ 
+ 	part = add_partition(disk, p, from, size, state->parts[p].flags,
+ 			     &state->parts[p].info);
+-	if (IS_ERR(part) && PTR_ERR(part) != -ENXIO) {
+-		printk(KERN_ERR " %s: p%d could not be added: %ld\n",
+-		       disk->disk_name, p, -PTR_ERR(part));
++	if (IS_ERR(part)) {
++		if (PTR_ERR(part) != -ENXIO) {
++			printk(KERN_ERR " %s: p%d could not be added: %pe\n",
++			       disk->disk_name, p, part);
++		}
+ 		return true;
+ 	}
+ 
+diff --git a/block/partitions/efi.c b/block/partitions/efi.c
+index 7ca5c4c..c945695 100644
+--- a/block/partitions/efi.c
++++ b/block/partitions/efi.c
+@@ -682,7 +682,7 @@ static void utf16_le_to_7bit(const __le16 *in, unsigned int size, u8 *out)
+ 	out[size] = 0;
+ 
+ 	while (i < size) {
+-		u8 c = le16_to_cpu(in[i]) & 0xff;
++		u8 c = le16_to_cpu(in[i]) & 0x7f;
+ 
+ 		if (c && !isprint(c))
+ 			c = '!';
+diff --git a/block/partitions/ldm.h b/block/partitions/ldm.h
+index 8693704..84a66b5 100644
+--- a/block/partitions/ldm.h
++++ b/block/partitions/ldm.h
+@@ -1,5 +1,5 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+-/**
++/*
+  * ldm - Part of the Linux-NTFS project.
+  *
+  * Copyright (C) 2001,2002 Richard Russon <ldm@flatcap.org>
+diff --git a/block/partitions/mac.c b/block/partitions/mac.c
+index 7b521df..6415213 100644
+--- a/block/partitions/mac.c
++++ b/block/partitions/mac.c
+@@ -51,13 +51,25 @@ int mac_partition(struct parsed_partitions *state)
+ 	}
+ 	secsize = be16_to_cpu(md->block_size);
+ 	put_dev_sector(sect);
++
++	/*
++	 * If the "block size" is not a power of 2, things get weird - we might
++	 * end up with a partition straddling a sector boundary, so we wouldn't
++	 * be able to read a partition entry with read_part_sector().
++	 * Real block sizes are probably (?) powers of two, so just require
++	 * that.
++	 */
++	if (!is_power_of_2(secsize))
++		return -1;
+ 	datasize = round_down(secsize, 512);
+ 	data = read_part_sector(state, datasize / 512, &sect);
+ 	if (!data)
+ 		return -1;
+ 	partoffset = secsize % 512;
+-	if (partoffset + sizeof(*part) > datasize)
++	if (partoffset + sizeof(*part) > datasize) {
++		put_dev_sector(sect);
+ 		return -1;
++	}
+ 	part = (struct mac_partition *) (data + partoffset);
+ 	if (be16_to_cpu(part->signature) != MAC_PARTITION_MAGIC) {
+ 		put_dev_sector(sect);
+@@ -110,8 +122,8 @@ int mac_partition(struct parsed_partitions *state)
+ 				int i, l;
+ 
+ 				goodness++;
+-				l = strlen(part->name);
+-				if (strcmp(part->name, "/") == 0)
++				l = strnlen(part->name, sizeof(part->name));
++				if (strncmp(part->name, "/", sizeof(part->name)) == 0)
+ 					goodness++;
+ 				for (i = 0; i <= l - 4; ++i) {
+ 					if (strncasecmp(part->name + i, "root",
+diff --git a/block/sed-opal.c b/block/sed-opal.c
+index 0ac5a4f..00e4d23 100644
+--- a/block/sed-opal.c
++++ b/block/sed-opal.c
+@@ -895,16 +895,20 @@ static int response_parse(const u8 *buf, size_t length,
+ 			token_length = response_parse_medium(iter, pos);
+ 		else if (pos[0] <= LONG_ATOM_BYTE) /* long atom */
+ 			token_length = response_parse_long(iter, pos);
++		else if (pos[0] == EMPTY_ATOM_BYTE) /* empty atom */
++			token_length = 1;
+ 		else /* TOKEN */
+ 			token_length = response_parse_token(iter, pos);
+ 
+ 		if (token_length < 0)
+ 			return token_length;
+ 
++		if (pos[0] != EMPTY_ATOM_BYTE)
++			num_entries++;
++
+ 		pos += token_length;
+ 		total -= token_length;
+ 		iter++;
+-		num_entries++;
+ 	}
+ 
+ 	resp->num = num_entries;

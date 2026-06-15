@@ -1,7 +1,7 @@
 # ABK F2FS / Storage Rollback Suite
 
-This ABK external module set rolls back the Android 14 / Linux 6.1 storage
-paths for the supported `93..162` range:
+This ABK external module set rolls back the Android 13 / Linux 5.15 and
+Android 14 / Linux 6.1 storage paths for the supported ranges:
 
 - `drivers/ufs`
 - `block`
@@ -10,10 +10,14 @@ paths for the supported `93..162` range:
 
 Rollback source baseline:
 
-- target behavior: `android14-6.1-2024-01_r24`
+- 5.15 target behavior: `android13-5.15-2024-08_r6`
+- 6.1 target behavior: `android14-6.1-2024-01_r24`
 
 Supported target window:
 
+- `android13-5.15-2024-09_r8` (`SUBLEVEL=153`)
+- ...
+- `android13-5.15-2026-03_r12` (`SUBLEVEL=197`)
 - `android14-6.1-2024-09_r14` (`SUBLEVEL=93`)
 - ...
 - `android14-6.1-2026-03_r15` (`SUBLEVEL=162`)
@@ -26,6 +30,10 @@ At runtime the module resolves the target monthly tag from:
 
 It then selects the matching pre-generated rollback patch set stored in this
 repository and applies it with `git apply --reverse`.
+
+Some 5.15 monthly targets intentionally carry empty patch files for a child
+module when that child has no delta at that month; these are treated as no-op
+patches.
 
 The module is intended for `after_patch` only. If `ABK_MODULE_CHILD_ID` is not
 set, all children are applied in this order:

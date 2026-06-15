@@ -1,0 +1,1399 @@
+diff --git a/drivers/md/Kconfig b/drivers/md/Kconfig
+index 0ced36a..cbed0a5 100644
+--- a/drivers/md/Kconfig
++++ b/drivers/md/Kconfig
+@@ -16,6 +16,10 @@ if MD
+ config BLK_DEV_MD
+ 	tristate "RAID support"
+ 	select BLOCK_HOLDER_DEPRECATED if SYSFS
++	# BLOCK_LEGACY_AUTOLOAD requirement should be removed
++	# after relevant mdadm enhancements - to make "names=yes"
++	# the default - are widely available.
++	select BLOCK_LEGACY_AUTOLOAD
+ 	help
+ 	  This driver lets you combine several hard disk partitions into one
+ 	  logical block device. This can be used to simply append one
+diff --git a/drivers/md/bcache/bset.c b/drivers/md/bcache/bset.c
+index 94d38e8..cb54420 100644
+--- a/drivers/md/bcache/bset.c
++++ b/drivers/md/bcache/bset.c
+@@ -54,7 +54,7 @@ void bch_dump_bucket(struct btree_keys *b)
+ int __bch_count_data(struct btree_keys *b)
+ {
+ 	unsigned int ret = 0;
+-	struct btree_iter iter;
++	struct btree_iter_stack iter;
+ 	struct bkey *k;
+ 
+ 	if (b->ops->is_extents)
+@@ -67,7 +67,7 @@ void __bch_check_keys(struct btree_keys *b, const char *fmt, ...)
+ {
+ 	va_list args;
+ 	struct bkey *k, *p = NULL;
+-	struct btree_iter iter;
++	struct btree_iter_stack iter;
+ 	const char *err;
+ 
+ 	for_each_key(b, k, &iter) {
+@@ -879,7 +879,7 @@ unsigned int bch_btree_insert_key(struct btree_keys *b, struct bkey *k,
+ 	unsigned int status = BTREE_INSERT_STATUS_NO_INSERT;
+ 	struct bset *i = bset_tree_last(b)->data;
+ 	struct bkey *m, *prev = NULL;
+-	struct btree_iter iter;
++	struct btree_iter_stack iter;
+ 	struct bkey preceding_key_on_stack = ZERO_KEY;
+ 	struct bkey *preceding_key_p = &preceding_key_on_stack;
+ 
+@@ -895,9 +895,9 @@ unsigned int bch_btree_insert_key(struct btree_keys *b, struct bkey *k,
+ 	else
+ 		preceding_key(k, &preceding_key_p);
+ 
+-	m = bch_btree_iter_init(b, &iter, preceding_key_p);
++	m = bch_btree_iter_stack_init(b, &iter, preceding_key_p);
+ 
+-	if (b->ops->insert_fixup(b, k, &iter, replace_key))
++	if (b->ops->insert_fixup(b, k, &iter.iter, replace_key))
+ 		return status;
+ 
+ 	status = BTREE_INSERT_STATUS_INSERT;
+@@ -1100,33 +1100,33 @@ void bch_btree_iter_push(struct btree_iter *iter, struct bkey *k,
+ 				 btree_iter_cmp));
+ }
+ 
+-static struct bkey *__bch_btree_iter_init(struct btree_keys *b,
+-					  struct btree_iter *iter,
+-					  struct bkey *search,
+-					  struct bset_tree *start)
++static struct bkey *__bch_btree_iter_stack_init(struct btree_keys *b,
++						struct btree_iter_stack *iter,
++						struct bkey *search,
++						struct bset_tree *start)
+ {
+ 	struct bkey *ret = NULL;
+ 
+-	iter->size = ARRAY_SIZE(iter->data);
+-	iter->used = 0;
++	iter->iter.size = ARRAY_SIZE(iter->stack_data);
++	iter->iter.used = 0;
+ 
+ #ifdef CONFIG_BCACHE_DEBUG
+-	iter->b = b;
++	iter->iter.b = b;
+ #endif
+ 
+ 	for (; start <= bset_tree_last(b); start++) {
+ 		ret = bch_bset_search(b, start, search);
+-		bch_btree_iter_push(iter, ret, bset_bkey_last(start->data));
++		bch_btree_iter_push(&iter->iter, ret, bset_bkey_last(start->data));
+ 	}
+ 
+ 	return ret;
+ }
+ 
+-struct bkey *bch_btree_iter_init(struct btree_keys *b,
+-				 struct btree_iter *iter,
++struct bkey *bch_btree_iter_stack_init(struct btree_keys *b,
++				 struct btree_iter_stack *iter,
+ 				 struct bkey *search)
+ {
+-	return __bch_btree_iter_init(b, iter, search, b->set);
++	return __bch_btree_iter_stack_init(b, iter, search, b->set);
+ }
+ 
+ static inline struct bkey *__bch_btree_iter_next(struct btree_iter *iter,
+@@ -1293,10 +1293,10 @@ void bch_btree_sort_partial(struct btree_keys *b, unsigned int start,
+ 			    struct bset_sort_state *state)
+ {
+ 	size_t order = b->page_order, keys = 0;
+-	struct btree_iter iter;
++	struct btree_iter_stack iter;
+ 	int oldsize = bch_count_data(b);
+ 
+-	__bch_btree_iter_init(b, &iter, NULL, &b->set[start]);
++	__bch_btree_iter_stack_init(b, &iter, NULL, &b->set[start]);
+ 
+ 	if (start) {
+ 		unsigned int i;
+@@ -1307,7 +1307,7 @@ void bch_btree_sort_partial(struct btree_keys *b, unsigned int start,
+ 		order = get_order(__set_bytes(b->set->data, keys));
+ 	}
+ 
+-	__btree_sort(b, &iter, start, order, false, state);
++	__btree_sort(b, &iter.iter, start, order, false, state);
+ 
+ 	EBUG_ON(oldsize >= 0 && bch_count_data(b) != oldsize);
+ }
+@@ -1323,11 +1323,11 @@ void bch_btree_sort_into(struct btree_keys *b, struct btree_keys *new,
+ 			 struct bset_sort_state *state)
+ {
+ 	uint64_t start_time = local_clock();
+-	struct btree_iter iter;
++	struct btree_iter_stack iter;
+ 
+-	bch_btree_iter_init(b, &iter, NULL);
++	bch_btree_iter_stack_init(b, &iter, NULL);
+ 
+-	btree_mergesort(b, new->set->data, &iter, false, true);
++	btree_mergesort(b, new->set->data, &iter.iter, false, true);
+ 
+ 	bch_time_stats_update(&state->time, start_time);
+ 
+diff --git a/drivers/md/bcache/bset.h b/drivers/md/bcache/bset.h
+index d795c84..011f606 100644
+--- a/drivers/md/bcache/bset.h
++++ b/drivers/md/bcache/bset.h
+@@ -321,7 +321,14 @@ struct btree_iter {
+ #endif
+ 	struct btree_iter_set {
+ 		struct bkey *k, *end;
+-	} data[MAX_BSETS];
++	} data[];
++};
++
++/* Fixed-size btree_iter that can be allocated on the stack */
++
++struct btree_iter_stack {
++	struct btree_iter iter;
++	struct btree_iter_set stack_data[MAX_BSETS];
+ };
+ 
+ typedef bool (*ptr_filter_fn)(struct btree_keys *b, const struct bkey *k);
+@@ -333,9 +340,9 @@ struct bkey *bch_btree_iter_next_filter(struct btree_iter *iter,
+ 
+ void bch_btree_iter_push(struct btree_iter *iter, struct bkey *k,
+ 			 struct bkey *end);
+-struct bkey *bch_btree_iter_init(struct btree_keys *b,
+-				 struct btree_iter *iter,
+-				 struct bkey *search);
++struct bkey *bch_btree_iter_stack_init(struct btree_keys *b,
++				       struct btree_iter_stack *iter,
++				       struct bkey *search);
+ 
+ struct bkey *__bch_bset_search(struct btree_keys *b, struct bset_tree *t,
+ 			       const struct bkey *search);
+@@ -350,13 +357,14 @@ static inline struct bkey *bch_bset_search(struct btree_keys *b,
+ 	return search ? __bch_bset_search(b, t, search) : t->data->start;
+ }
+ 
+-#define for_each_key_filter(b, k, iter, filter)				\
+-	for (bch_btree_iter_init((b), (iter), NULL);			\
+-	     ((k) = bch_btree_iter_next_filter((iter), (b), filter));)
++#define for_each_key_filter(b, k, stack_iter, filter)                      \
++	for (bch_btree_iter_stack_init((b), (stack_iter), NULL);           \
++	     ((k) = bch_btree_iter_next_filter(&((stack_iter)->iter), (b), \
++					       filter));)
+ 
+-#define for_each_key(b, k, iter)					\
+-	for (bch_btree_iter_init((b), (iter), NULL);			\
+-	     ((k) = bch_btree_iter_next(iter));)
++#define for_each_key(b, k, stack_iter)                           \
++	for (bch_btree_iter_stack_init((b), (stack_iter), NULL); \
++	     ((k) = bch_btree_iter_next(&((stack_iter)->iter)));)
+ 
+ /* Sorting */
+ 
+diff --git a/drivers/md/bcache/btree.c b/drivers/md/bcache/btree.c
+index e22dfcf..066b4aa 100644
+--- a/drivers/md/bcache/btree.c
++++ b/drivers/md/bcache/btree.c
+@@ -1283,7 +1283,7 @@ static bool btree_gc_mark_node(struct btree *b, struct gc_stat *gc)
+ 	uint8_t stale = 0;
+ 	unsigned int keys = 0, good_keys = 0;
+ 	struct bkey *k;
+-	struct btree_iter iter;
++	struct btree_iter_stack iter;
+ 	struct bset_tree *t;
+ 
+ 	gc->nodes++;
+@@ -1544,7 +1544,7 @@ static int btree_gc_rewrite_node(struct btree *b, struct btree_op *op,
+ static unsigned int btree_gc_count_keys(struct btree *b)
+ {
+ 	struct bkey *k;
+-	struct btree_iter iter;
++	struct btree_iter_stack iter;
+ 	unsigned int ret = 0;
+ 
+ 	for_each_key_filter(&b->keys, k, &iter, bch_ptr_bad)
+@@ -1585,17 +1585,18 @@ static int btree_gc_recurse(struct btree *b, struct btree_op *op,
+ 	int ret = 0;
+ 	bool should_rewrite;
+ 	struct bkey *k;
+-	struct btree_iter iter;
++	struct btree_iter_stack iter;
+ 	struct gc_merge_info r[GC_MERGE_NODES];
+ 	struct gc_merge_info *i, *last = r + ARRAY_SIZE(r) - 1;
+ 
+-	bch_btree_iter_init(&b->keys, &iter, &b->c->gc_done);
++	bch_btree_iter_stack_init(&b->keys, &iter, &b->c->gc_done);
+ 
+ 	for (i = r; i < r + ARRAY_SIZE(r); i++)
+ 		i->b = ERR_PTR(-EINTR);
+ 
+ 	while (1) {
+-		k = bch_btree_iter_next_filter(&iter, &b->keys, bch_ptr_bad);
++		k = bch_btree_iter_next_filter(&iter.iter, &b->keys,
++					       bch_ptr_bad);
+ 		if (k) {
+ 			r->b = bch_btree_node_get(b->c, op, k, b->level - 1,
+ 						  true, b);
+@@ -1885,7 +1886,7 @@ static int bch_btree_check_recurse(struct btree *b, struct btree_op *op)
+ {
+ 	int ret = 0;
+ 	struct bkey *k, *p = NULL;
+-	struct btree_iter iter;
++	struct btree_iter_stack iter;
+ 
+ 	for_each_key_filter(&b->keys, k, &iter, bch_ptr_invalid)
+ 		bch_initial_mark_key(b->c, b->level, k);
+@@ -1893,10 +1894,10 @@ static int bch_btree_check_recurse(struct btree *b, struct btree_op *op)
+ 	bch_initial_mark_key(b->c, b->level + 1, &b->key);
+ 
+ 	if (b->level) {
+-		bch_btree_iter_init(&b->keys, &iter, NULL);
++		bch_btree_iter_stack_init(&b->keys, &iter, NULL);
+ 
+ 		do {
+-			k = bch_btree_iter_next_filter(&iter, &b->keys,
++			k = bch_btree_iter_next_filter(&iter.iter, &b->keys,
+ 						       bch_ptr_bad);
+ 			if (k) {
+ 				btree_node_prefetch(b, k);
+@@ -1924,7 +1925,7 @@ static int bch_btree_check_thread(void *arg)
+ 	struct btree_check_info *info = arg;
+ 	struct btree_check_state *check_state = info->state;
+ 	struct cache_set *c = check_state->c;
+-	struct btree_iter iter;
++	struct btree_iter_stack iter;
+ 	struct bkey *k, *p;
+ 	int cur_idx, prev_idx, skip_nr;
+ 
+@@ -1933,8 +1934,8 @@ static int bch_btree_check_thread(void *arg)
+ 	ret = 0;
+ 
+ 	/* root node keys are checked before thread created */
+-	bch_btree_iter_init(&c->root->keys, &iter, NULL);
+-	k = bch_btree_iter_next_filter(&iter, &c->root->keys, bch_ptr_bad);
++	bch_btree_iter_stack_init(&c->root->keys, &iter, NULL);
++	k = bch_btree_iter_next_filter(&iter.iter, &c->root->keys, bch_ptr_bad);
+ 	BUG_ON(!k);
+ 
+ 	p = k;
+@@ -1952,7 +1953,7 @@ static int bch_btree_check_thread(void *arg)
+ 		skip_nr = cur_idx - prev_idx;
+ 
+ 		while (skip_nr) {
+-			k = bch_btree_iter_next_filter(&iter,
++			k = bch_btree_iter_next_filter(&iter.iter,
+ 						       &c->root->keys,
+ 						       bch_ptr_bad);
+ 			if (k)
+@@ -2025,7 +2026,7 @@ int bch_btree_check(struct cache_set *c)
+ 	int ret = 0;
+ 	int i;
+ 	struct bkey *k = NULL;
+-	struct btree_iter iter;
++	struct btree_iter_stack iter;
+ 	struct btree_check_state check_state;
+ 
+ 	/* check and mark root node keys */
+@@ -2521,11 +2522,11 @@ static int bch_btree_map_nodes_recurse(struct btree *b, struct btree_op *op,
+ 
+ 	if (b->level) {
+ 		struct bkey *k;
+-		struct btree_iter iter;
++		struct btree_iter_stack iter;
+ 
+-		bch_btree_iter_init(&b->keys, &iter, from);
++		bch_btree_iter_stack_init(&b->keys, &iter, from);
+ 
+-		while ((k = bch_btree_iter_next_filter(&iter, &b->keys,
++		while ((k = bch_btree_iter_next_filter(&iter.iter, &b->keys,
+ 						       bch_ptr_bad))) {
+ 			ret = bcache_btree(map_nodes_recurse, k, b,
+ 				    op, from, fn, flags);
+@@ -2554,11 +2555,12 @@ int bch_btree_map_keys_recurse(struct btree *b, struct btree_op *op,
+ {
+ 	int ret = MAP_CONTINUE;
+ 	struct bkey *k;
+-	struct btree_iter iter;
++	struct btree_iter_stack iter;
+ 
+-	bch_btree_iter_init(&b->keys, &iter, from);
++	bch_btree_iter_stack_init(&b->keys, &iter, from);
+ 
+-	while ((k = bch_btree_iter_next_filter(&iter, &b->keys, bch_ptr_bad))) {
++	while ((k = bch_btree_iter_next_filter(&iter.iter, &b->keys,
++					       bch_ptr_bad))) {
+ 		ret = !b->level
+ 			? fn(op, b, k)
+ 			: bcache_btree(map_keys_recurse, k,
+diff --git a/drivers/md/bcache/super.c b/drivers/md/bcache/super.c
+index 8ec48d8..4b79b79 100644
+--- a/drivers/md/bcache/super.c
++++ b/drivers/md/bcache/super.c
+@@ -1731,7 +1731,7 @@ static void cache_set_flush(struct closure *cl)
+ 	if (!IS_ERR_OR_NULL(c->gc_thread))
+ 		kthread_stop(c->gc_thread);
+ 
+-	if (!IS_ERR(c->root))
++	if (!IS_ERR_OR_NULL(c->root))
+ 		list_add(&c->root->list, &c->btree_cache);
+ 
+ 	/*
+@@ -1920,8 +1920,9 @@ struct cache_set *bch_cache_set_alloc(struct cache_sb *sb)
+ 	INIT_LIST_HEAD(&c->btree_cache_freed);
+ 	INIT_LIST_HEAD(&c->data_buckets);
+ 
+-	iter_size = ((meta_bucket_pages(sb) * PAGE_SECTORS) / sb->block_size + 1) *
+-		sizeof(struct btree_iter_set);
++	iter_size = sizeof(struct btree_iter) +
++		    ((meta_bucket_pages(sb) * PAGE_SECTORS) / sb->block_size) *
++			    sizeof(struct btree_iter_set);
+ 
+ 	c->devices = kcalloc(c->nr_uuids, sizeof(void *), GFP_KERNEL);
+ 	if (!c->devices)
+diff --git a/drivers/md/bcache/sysfs.c b/drivers/md/bcache/sysfs.c
+index fa14601..7024eae 100644
+--- a/drivers/md/bcache/sysfs.c
++++ b/drivers/md/bcache/sysfs.c
+@@ -658,7 +658,7 @@ static unsigned int bch_root_usage(struct cache_set *c)
+ 	unsigned int bytes = 0;
+ 	struct bkey *k;
+ 	struct btree *b;
+-	struct btree_iter iter;
++	struct btree_iter_stack iter;
+ 
+ 	goto lock_root;
+ 
+diff --git a/drivers/md/bcache/writeback.c b/drivers/md/bcache/writeback.c
+index 1e96679..142eaf0 100644
+--- a/drivers/md/bcache/writeback.c
++++ b/drivers/md/bcache/writeback.c
+@@ -898,15 +898,15 @@ static int bch_dirty_init_thread(void *arg)
+ 	struct dirty_init_thrd_info *info = arg;
+ 	struct bch_dirty_init_state *state = info->state;
+ 	struct cache_set *c = state->c;
+-	struct btree_iter iter;
++	struct btree_iter_stack iter;
+ 	struct bkey *k, *p;
+ 	int cur_idx, prev_idx, skip_nr;
+ 
+ 	k = p = NULL;
+ 	prev_idx = 0;
+ 
+-	bch_btree_iter_init(&c->root->keys, &iter, NULL);
+-	k = bch_btree_iter_next_filter(&iter, &c->root->keys, bch_ptr_bad);
++	bch_btree_iter_stack_init(&c->root->keys, &iter, NULL);
++	k = bch_btree_iter_next_filter(&iter.iter, &c->root->keys, bch_ptr_bad);
+ 	BUG_ON(!k);
+ 
+ 	p = k;
+@@ -920,7 +920,7 @@ static int bch_dirty_init_thread(void *arg)
+ 		skip_nr = cur_idx - prev_idx;
+ 
+ 		while (skip_nr) {
+-			k = bch_btree_iter_next_filter(&iter,
++			k = bch_btree_iter_next_filter(&iter.iter,
+ 						       &c->root->keys,
+ 						       bch_ptr_bad);
+ 			if (k)
+@@ -969,7 +969,7 @@ void bch_sectors_dirty_init(struct bcache_device *d)
+ 	int i;
+ 	struct btree *b = NULL;
+ 	struct bkey *k = NULL;
+-	struct btree_iter iter;
++	struct btree_iter_stack iter;
+ 	struct sectors_dirty_init op;
+ 	struct cache_set *c = d->c;
+ 	struct bch_dirty_init_state state;
+diff --git a/drivers/md/dm-cache-target.c b/drivers/md/dm-cache-target.c
+index 24cd28e..31c4100 100644
+--- a/drivers/md/dm-cache-target.c
++++ b/drivers/md/dm-cache-target.c
+@@ -1988,7 +1988,6 @@ struct cache_args {
+ 	sector_t cache_sectors;
+ 
+ 	struct dm_dev *origin_dev;
+-	sector_t origin_sectors;
+ 
+ 	uint32_t block_size;
+ 
+@@ -2070,6 +2069,7 @@ static int parse_cache_dev(struct cache_args *ca, struct dm_arg_set *as,
+ static int parse_origin_dev(struct cache_args *ca, struct dm_arg_set *as,
+ 			    char **error)
+ {
++	sector_t origin_sectors;
+ 	int r;
+ 
+ 	if (!at_least_one_arg(as, error))
+@@ -2082,8 +2082,8 @@ static int parse_origin_dev(struct cache_args *ca, struct dm_arg_set *as,
+ 		return r;
+ 	}
+ 
+-	ca->origin_sectors = get_dev_size(ca->origin_dev);
+-	if (ca->ti->len > ca->origin_sectors) {
++	origin_sectors = get_dev_size(ca->origin_dev);
++	if (ca->ti->len > origin_sectors) {
+ 		*error = "Device size larger than cached device";
+ 		return -EINVAL;
+ 	}
+@@ -2392,7 +2392,7 @@ static int cache_create(struct cache_args *ca, struct cache **result)
+ 
+ 	ca->metadata_dev = ca->origin_dev = ca->cache_dev = NULL;
+ 
+-	origin_blocks = cache->origin_sectors = ca->origin_sectors;
++	origin_blocks = cache->origin_sectors = ti->len;
+ 	origin_blocks = block_div(origin_blocks, ca->block_size);
+ 	cache->origin_blocks = to_oblock(origin_blocks);
+ 
+@@ -2880,19 +2880,19 @@ static dm_cblock_t get_cache_dev_size(struct cache *cache)
+ static bool can_resize(struct cache *cache, dm_cblock_t new_size)
+ {
+ 	if (from_cblock(new_size) > from_cblock(cache->cache_size)) {
+-		if (cache->sized) {
+-			DMERR("%s: unable to extend cache due to missing cache table reload",
+-			      cache_device_name(cache));
+-			return false;
+-		}
++		DMERR("%s: unable to extend cache due to missing cache table reload",
++		      cache_device_name(cache));
++		return false;
+ 	}
+ 
+ 	/*
+ 	 * We can't drop a dirty block when shrinking the cache.
+ 	 */
+-	while (from_cblock(new_size) < from_cblock(cache->cache_size)) {
+-		new_size = to_cblock(from_cblock(new_size) + 1);
+-		if (is_dirty(cache, new_size)) {
++	if (cache->loaded_mappings) {
++		new_size = to_cblock(find_next_bit(cache->dirty_bitset,
++						   from_cblock(cache->cache_size),
++						   from_cblock(new_size)));
++		if (new_size != cache->cache_size) {
+ 			DMERR("%s: unable to shrink cache; cache block %llu is dirty",
+ 			      cache_device_name(cache),
+ 			      (unsigned long long) from_cblock(new_size));
+@@ -2928,20 +2928,15 @@ static int cache_preresume(struct dm_target *ti)
+ 	/*
+ 	 * Check to see if the cache has resized.
+ 	 */
+-	if (!cache->sized) {
+-		r = resize_cache_dev(cache, csize);
+-		if (r)
+-			return r;
+-
+-		cache->sized = true;
+-
+-	} else if (csize != cache->cache_size) {
++	if (!cache->sized || csize != cache->cache_size) {
+ 		if (!can_resize(cache, csize))
+ 			return -EINVAL;
+ 
+ 		r = resize_cache_dev(cache, csize);
+ 		if (r)
+ 			return r;
++
++		cache->sized = true;
+ 	}
+ 
+ 	if (!cache->loaded_mappings) {
+diff --git a/drivers/md/dm-clone-metadata.c b/drivers/md/dm-clone-metadata.c
+index c43d556..47c1fa7 100644
+--- a/drivers/md/dm-clone-metadata.c
++++ b/drivers/md/dm-clone-metadata.c
+@@ -465,11 +465,6 @@ static void __destroy_persistent_data_structures(struct dm_clone_metadata *cmd)
+ 
+ /*---------------------------------------------------------------------------*/
+ 
+-static size_t bitmap_size(unsigned long nr_bits)
+-{
+-	return BITS_TO_LONGS(nr_bits) * sizeof(long);
+-}
+-
+ static int __dirty_map_init(struct dirty_map *dmap, unsigned long nr_words,
+ 			    unsigned long nr_regions)
+ {
+diff --git a/drivers/md/dm-crypt.c b/drivers/md/dm-crypt.c
+index 7ff20cf..4f44cbc 100644
+--- a/drivers/md/dm-crypt.c
++++ b/drivers/md/dm-crypt.c
+@@ -49,11 +49,12 @@
+ struct convert_context {
+ 	struct completion restart;
+ 	struct bio *bio_in;
+-	struct bio *bio_out;
+ 	struct bvec_iter iter_in;
++	struct bio *bio_out;
+ 	struct bvec_iter iter_out;
+-	u64 cc_sector;
+ 	atomic_t cc_pending;
++	unsigned int tag_offset;
++	u64 cc_sector;
+ 	union {
+ 		struct skcipher_request *req;
+ 		struct aead_request *req_aead;
+@@ -69,10 +70,8 @@ struct dm_crypt_io {
+ 	struct bio *base_bio;
+ 	u8 *integrity_metadata;
+ 	bool integrity_metadata_from_pool:1;
+-	bool in_tasklet:1;
+ 
+ 	struct work_struct work;
+-	struct tasklet_struct tasklet;
+ 
+ 	struct convert_context ctx;
+ 
+@@ -1219,6 +1218,7 @@ static void crypt_convert_init(struct crypt_config *cc,
+ 	if (bio_out)
+ 		ctx->iter_out = bio_out->bi_iter;
+ 	ctx->cc_sector = sector + cc->iv_offset;
++	ctx->tag_offset = 0;
+ 	init_completion(&ctx->restart);
+ }
+ 
+@@ -1544,7 +1544,6 @@ static void crypt_free_req(struct crypt_config *cc, void *req, struct bio *base_
+ static blk_status_t crypt_convert(struct crypt_config *cc,
+ 			 struct convert_context *ctx, bool atomic, bool reset_pending)
+ {
+-	unsigned int tag_offset = 0;
+ 	unsigned int sector_step = cc->sector_size >> SECTOR_SHIFT;
+ 	int r;
+ 
+@@ -1567,9 +1566,9 @@ static blk_status_t crypt_convert(struct crypt_config *cc,
+ 		atomic_inc(&ctx->cc_pending);
+ 
+ 		if (crypt_integrity_aead(cc))
+-			r = crypt_convert_block_aead(cc, ctx, ctx->r.req_aead, tag_offset);
++			r = crypt_convert_block_aead(cc, ctx, ctx->r.req_aead, ctx->tag_offset);
+ 		else
+-			r = crypt_convert_block_skcipher(cc, ctx, ctx->r.req, tag_offset);
++			r = crypt_convert_block_skcipher(cc, ctx, ctx->r.req, ctx->tag_offset);
+ 
+ 		switch (r) {
+ 		/*
+@@ -1589,8 +1588,8 @@ static blk_status_t crypt_convert(struct crypt_config *cc,
+ 					 * exit and continue processing in a workqueue
+ 					 */
+ 					ctx->r.req = NULL;
++					ctx->tag_offset++;
+ 					ctx->cc_sector += sector_step;
+-					tag_offset++;
+ 					return BLK_STS_DEV_RESOURCE;
+ 				}
+ 			} else {
+@@ -1604,8 +1603,8 @@ static blk_status_t crypt_convert(struct crypt_config *cc,
+ 		 */
+ 		case -EINPROGRESS:
+ 			ctx->r.req = NULL;
++			ctx->tag_offset++;
+ 			ctx->cc_sector += sector_step;
+-			tag_offset++;
+ 			continue;
+ 		/*
+ 		 * The request was already processed (synchronously).
+@@ -1613,7 +1612,7 @@ static blk_status_t crypt_convert(struct crypt_config *cc,
+ 		case 0:
+ 			atomic_dec(&ctx->cc_pending);
+ 			ctx->cc_sector += sector_step;
+-			tag_offset++;
++			ctx->tag_offset++;
+ 			if (!atomic)
+ 				cond_resched();
+ 			continue;
+@@ -1726,7 +1725,6 @@ static void crypt_io_init(struct dm_crypt_io *io, struct crypt_config *cc,
+ 	io->ctx.r.req = NULL;
+ 	io->integrity_metadata = NULL;
+ 	io->integrity_metadata_from_pool = false;
+-	io->in_tasklet = false;
+ 	atomic_set(&io->io_pending, 0);
+ }
+ 
+@@ -1735,12 +1733,6 @@ static void crypt_inc_pending(struct dm_crypt_io *io)
+ 	atomic_inc(&io->io_pending);
+ }
+ 
+-static void kcryptd_io_bio_endio(struct work_struct *work)
+-{
+-	struct dm_crypt_io *io = container_of(work, struct dm_crypt_io, work);
+-	bio_endio(io->base_bio);
+-}
+-
+ /*
+  * One of the bios was finished. Check for completion of
+  * the whole request and correctly clean up the buffer.
+@@ -1764,20 +1756,6 @@ static void crypt_dec_pending(struct dm_crypt_io *io)
+ 
+ 	base_bio->bi_status = error;
+ 
+-	/*
+-	 * If we are running this function from our tasklet,
+-	 * we can't call bio_endio() here, because it will call
+-	 * clone_endio() from dm.c, which in turn will
+-	 * free the current struct dm_crypt_io structure with
+-	 * our tasklet. In this case we need to delay bio_endio()
+-	 * execution to after the tasklet is done and dequeued.
+-	 */
+-	if (io->in_tasklet) {
+-		INIT_WORK(&io->work, kcryptd_io_bio_endio);
+-		queue_work(cc->io_queue, &io->work);
+-		return;
+-	}
+-
+ 	bio_endio(base_bio);
+ }
+ 
+@@ -2017,7 +1995,6 @@ static void kcryptd_crypt_write_continue(struct work_struct *work)
+ 	struct crypt_config *cc = io->cc;
+ 	struct convert_context *ctx = &io->ctx;
+ 	int crypt_finished;
+-	sector_t sector = io->sector;
+ 	blk_status_t r;
+ 
+ 	wait_for_completion(&ctx->restart);
+@@ -2034,10 +2011,8 @@ static void kcryptd_crypt_write_continue(struct work_struct *work)
+ 	}
+ 
+ 	/* Encryption was already finished, submit io now */
+-	if (crypt_finished) {
++	if (crypt_finished)
+ 		kcryptd_crypt_write_io_submit(io, 0);
+-		io->sector = sector;
+-	}
+ 
+ 	crypt_dec_pending(io);
+ }
+@@ -2048,14 +2023,13 @@ static void kcryptd_crypt_write_convert(struct dm_crypt_io *io)
+ 	struct convert_context *ctx = &io->ctx;
+ 	struct bio *clone;
+ 	int crypt_finished;
+-	sector_t sector = io->sector;
+ 	blk_status_t r;
+ 
+ 	/*
+ 	 * Prevent io from disappearing until this function completes.
+ 	 */
+ 	crypt_inc_pending(io);
+-	crypt_convert_init(cc, ctx, NULL, io->base_bio, sector);
++	crypt_convert_init(cc, ctx, NULL, io->base_bio, io->sector);
+ 
+ 	clone = crypt_alloc_buffer(io, io->base_bio->bi_iter.bi_size);
+ 	if (unlikely(!clone)) {
+@@ -2072,8 +2046,6 @@ static void kcryptd_crypt_write_convert(struct dm_crypt_io *io)
+ 		io->ctx.iter_in = clone->bi_iter;
+ 	}
+ 
+-	sector += bio_sectors(clone);
+-
+ 	crypt_inc_pending(io);
+ 	r = crypt_convert(cc, ctx,
+ 			  test_bit(DM_CRYPT_NO_WRITE_WORKQUEUE, &cc->flags), true);
+@@ -2097,10 +2069,8 @@ static void kcryptd_crypt_write_convert(struct dm_crypt_io *io)
+ 	}
+ 
+ 	/* Encryption was already finished, submit io now */
+-	if (crypt_finished) {
++	if (crypt_finished)
+ 		kcryptd_crypt_write_io_submit(io, 0);
+-		io->sector = sector;
+-	}
+ 
+ dec:
+ 	crypt_dec_pending(io);
+@@ -2221,11 +2191,6 @@ static void kcryptd_crypt(struct work_struct *work)
+ 		kcryptd_crypt_write_convert(io);
+ }
+ 
+-static void kcryptd_crypt_tasklet(unsigned long work)
+-{
+-	kcryptd_crypt((struct work_struct *)work);
+-}
+-
+ static void kcryptd_queue_crypt(struct dm_crypt_io *io)
+ {
+ 	struct crypt_config *cc = io->cc;
+@@ -2237,15 +2202,10 @@ static void kcryptd_queue_crypt(struct dm_crypt_io *io)
+ 		 * irqs_disabled(): the kernel may run some IO completion from the idle thread, but
+ 		 * it is being executed with irqs disabled.
+ 		 */
+-		if (in_hardirq() || irqs_disabled()) {
+-			io->in_tasklet = true;
+-			tasklet_init(&io->tasklet, kcryptd_crypt_tasklet, (unsigned long)&io->work);
+-			tasklet_schedule(&io->tasklet);
++		if (!(in_hardirq() || irqs_disabled())) {
++			kcryptd_crypt(&io->work);
+ 			return;
+ 		}
+-
+-		kcryptd_crypt(&io->work);
+-		return;
+ 	}
+ 
+ 	INIT_WORK(&io->work, kcryptd_crypt);
+diff --git a/drivers/md/dm-ebs-target.c b/drivers/md/dm-ebs-target.c
+index d259896..418fdc7 100644
+--- a/drivers/md/dm-ebs-target.c
++++ b/drivers/md/dm-ebs-target.c
+@@ -440,7 +440,7 @@ static int ebs_iterate_devices(struct dm_target *ti,
+ static struct target_type ebs_target = {
+ 	.name		 = "ebs",
+ 	.version	 = {1, 0, 1},
+-	.features	 = DM_TARGET_PASSES_INTEGRITY,
++	.features	 = 0,
+ 	.module		 = THIS_MODULE,
+ 	.ctr		 = ebs_ctr,
+ 	.dtr		 = ebs_dtr,
+diff --git a/drivers/md/dm-init.c b/drivers/md/dm-init.c
+index dc4381d..6e9e73a 100644
+--- a/drivers/md/dm-init.c
++++ b/drivers/md/dm-init.c
+@@ -213,8 +213,10 @@ static char __init *dm_parse_device_entry(struct dm_device *dev, char *str)
+ 	strscpy(dev->dmi.uuid, field[1], sizeof(dev->dmi.uuid));
+ 	/* minor */
+ 	if (strlen(field[2])) {
+-		if (kstrtoull(field[2], 0, &dev->dmi.dev))
++		if (kstrtoull(field[2], 0, &dev->dmi.dev) ||
++		    dev->dmi.dev >= (1 << MINORBITS))
+ 			return ERR_PTR(-EINVAL);
++		dev->dmi.dev = huge_encode_dev((dev_t)dev->dmi.dev);
+ 		dev->dmi.flags |= DM_PERSISTENT_DEV_FLAG;
+ 	}
+ 	/* flags */
+diff --git a/drivers/md/dm-integrity.c b/drivers/md/dm-integrity.c
+index fea3682..f83a82b 100644
+--- a/drivers/md/dm-integrity.c
++++ b/drivers/md/dm-integrity.c
+@@ -4083,7 +4083,7 @@ static int dm_integrity_ctr(struct dm_target *ti, unsigned argc, char **argv)
+ 		} else if (sscanf(opt_string, "sectors_per_bit:%llu%c", &llval, &dummy) == 1) {
+ 			log2_sectors_per_bitmap_bit = !llval ? 0 : __ilog2_u64(llval);
+ 		} else if (sscanf(opt_string, "bitmap_flush_interval:%u%c", &val, &dummy) == 1) {
+-			if (val >= (uint64_t)UINT_MAX * 1000 / HZ) {
++			if ((uint64_t)val >= (uint64_t)UINT_MAX * 1000 / HZ) {
+ 				r = -EINVAL;
+ 				ti->error = "Invalid bitmap_flush_interval argument";
+ 				goto bad;
+diff --git a/drivers/md/dm-ioctl.c b/drivers/md/dm-ioctl.c
+index c1bcc85..fb0987e 100644
+--- a/drivers/md/dm-ioctl.c
++++ b/drivers/md/dm-ioctl.c
+@@ -1151,8 +1151,26 @@ static int do_resume(struct dm_ioctl *param)
+ 			suspend_flags &= ~DM_SUSPEND_LOCKFS_FLAG;
+ 		if (param->flags & DM_NOFLUSH_FLAG)
+ 			suspend_flags |= DM_SUSPEND_NOFLUSH_FLAG;
+-		if (!dm_suspended_md(md))
+-			dm_suspend(md, suspend_flags);
++		if (!dm_suspended_md(md)) {
++			r = dm_suspend(md, suspend_flags);
++			if (r) {
++				down_write(&_hash_lock);
++				hc = dm_get_mdptr(md);
++				if (hc && !hc->new_map) {
++					hc->new_map = new_map;
++					new_map = NULL;
++				} else {
++					r = -ENXIO;
++				}
++				up_write(&_hash_lock);
++				if (new_map) {
++					dm_sync_table(md);
++					dm_table_destroy(new_map);
++				}
++				dm_put(md);
++				return r;
++			}
++		}
+ 
+ 		old_size = dm_get_size(md);
+ 		old_map = dm_swap_table(md, new_map);
+diff --git a/drivers/md/dm-raid.c b/drivers/md/dm-raid.c
+index 8d48993..5d10061 100644
+--- a/drivers/md/dm-raid.c
++++ b/drivers/md/dm-raid.c
+@@ -3329,14 +3329,14 @@ static int raid_map(struct dm_target *ti, struct bio *bio)
+ 	struct mddev *mddev = &rs->md;
+ 
+ 	/*
+-	 * If we're reshaping to add disk(s)), ti->len and
++	 * If we're reshaping to add disk(s), ti->len and
+ 	 * mddev->array_sectors will differ during the process
+ 	 * (ti->len > mddev->array_sectors), so we have to requeue
+ 	 * bios with addresses > mddev->array_sectors here or
+ 	 * there will occur accesses past EOD of the component
+ 	 * data images thus erroring the raid set.
+ 	 */
+-	if (unlikely(bio_end_sector(bio) > mddev->array_sectors))
++	if (unlikely(bio_has_data(bio) && bio_end_sector(bio) > mddev->array_sectors))
+ 		return DM_MAPIO_REQUEUE;
+ 
+ 	md_handle_request(mddev, bio);
+@@ -4049,7 +4049,9 @@ static void raid_resume(struct dm_target *ti)
+ 		 * Take this opportunity to check whether any failed
+ 		 * devices are reachable again.
+ 		 */
++		mddev_lock_nointr(mddev);
+ 		attempt_restore_of_faulty_devices(rs);
++		mddev_unlock(mddev);
+ 	}
+ 
+ 	if (test_and_clear_bit(RT_FLAG_RS_SUSPENDED, &rs->runtime_flags)) {
+diff --git a/drivers/md/dm-rq.c b/drivers/md/dm-rq.c
+index 53a9b16..7eedcd0 100644
+--- a/drivers/md/dm-rq.c
++++ b/drivers/md/dm-rq.c
+@@ -504,8 +504,10 @@ static blk_status_t dm_mq_queue_rq(struct blk_mq_hw_ctx *hctx,
+ 
+ 		map = dm_get_live_table(md, &srcu_idx);
+ 		if (unlikely(!map)) {
++			DMERR_LIMIT("%s: mapping table unavailable, erroring io",
++				    dm_device_name(md));
+ 			dm_put_live_table(md, srcu_idx);
+-			return BLK_STS_RESOURCE;
++			return BLK_STS_IOERR;
+ 		}
+ 		ti = dm_table_find_target(map, 0);
+ 		dm_put_live_table(md, srcu_idx);
+diff --git a/drivers/md/dm-snap.c b/drivers/md/dm-snap.c
+index dcf34c6..d3716d5 100644
+--- a/drivers/md/dm-snap.c
++++ b/drivers/md/dm-snap.c
+@@ -686,8 +686,10 @@ static void dm_exception_table_exit(struct dm_exception_table *et,
+ 	for (i = 0; i < size; i++) {
+ 		slot = et->table + i;
+ 
+-		hlist_bl_for_each_entry_safe(ex, pos, n, slot, hash_list)
++		hlist_bl_for_each_entry_safe(ex, pos, n, slot, hash_list) {
+ 			kmem_cache_free(mem, ex);
++			cond_resched();
++		}
+ 	}
+ 
+ 	kvfree(et->table);
+diff --git a/drivers/md/dm-thin.c b/drivers/md/dm-thin.c
+index 1cf6526..afdd1ef 100644
+--- a/drivers/md/dm-thin.c
++++ b/drivers/md/dm-thin.c
+@@ -2317,10 +2317,9 @@ static struct thin_c *get_first_thin(struct pool *pool)
+ 	struct thin_c *tc = NULL;
+ 
+ 	rcu_read_lock();
+-	if (!list_empty(&pool->active_thins)) {
+-		tc = list_entry_rcu(pool->active_thins.next, struct thin_c, list);
++	tc = list_first_or_null_rcu(&pool->active_thins, struct thin_c, list);
++	if (tc)
+ 		thin_get(tc);
+-	}
+ 	rcu_read_unlock();
+ 
+ 	return tc;
+@@ -2468,6 +2467,7 @@ static void pool_work_wait(struct pool_work *pw, struct pool *pool,
+ 	init_completion(&pw->complete);
+ 	queue_work(pool->wq, &pw->worker);
+ 	wait_for_completion(&pw->complete);
++	destroy_work_on_stack(&pw->worker);
+ }
+ 
+ /*----------------------------------------------------------------*/
+diff --git a/drivers/md/dm-unstripe.c b/drivers/md/dm-unstripe.c
+index fdc8921..e69d297 100644
+--- a/drivers/md/dm-unstripe.c
++++ b/drivers/md/dm-unstripe.c
+@@ -84,8 +84,8 @@ static int unstripe_ctr(struct dm_target *ti, unsigned int argc, char **argv)
+ 	}
+ 	uc->physical_start = start;
+ 
+-	uc->unstripe_offset = uc->unstripe * uc->chunk_size;
+-	uc->unstripe_width = (uc->stripes - 1) * uc->chunk_size;
++	uc->unstripe_offset = (sector_t)uc->unstripe * uc->chunk_size;
++	uc->unstripe_width = (sector_t)(uc->stripes - 1) * uc->chunk_size;
+ 	uc->chunk_shift = is_power_of_2(uc->chunk_size) ? fls(uc->chunk_size) - 1 : 0;
+ 
+ 	tmp_len = ti->len;
+diff --git a/drivers/md/dm-verity.h b/drivers/md/dm-verity.h
+index 78d1e51..f61c89c 100644
+--- a/drivers/md/dm-verity.h
++++ b/drivers/md/dm-verity.h
+@@ -74,11 +74,11 @@ struct dm_verity_io {
+ 	/* original value of bio->bi_end_io */
+ 	bio_end_io_t *orig_bi_end_io;
+ 
++	struct bvec_iter iter;
++
+ 	sector_t block;
+ 	unsigned n_blocks;
+ 
+-	struct bvec_iter iter;
+-
+ 	struct work_struct work;
+ 
+ 	/*
+diff --git a/drivers/md/dm.c b/drivers/md/dm.c
+index 4e4fb5e..32d5355 100644
+--- a/drivers/md/dm.c
++++ b/drivers/md/dm.c
+@@ -1593,10 +1593,15 @@ static blk_qc_t dm_submit_bio(struct bio *bio)
+ 	struct dm_table *map;
+ 
+ 	map = dm_get_live_table(md, &srcu_idx);
++	if (unlikely(!map)) {
++		DMERR_LIMIT("%s: mapping table unavailable, erroring io",
++			    dm_device_name(md));
++		bio_io_error(bio);
++		goto out;
++	}
+ 
+-	/* If suspended, or map not yet available, queue this IO for later */
+-	if (unlikely(test_bit(DMF_BLOCK_IO_FOR_SUSPEND, &md->flags)) ||
+-	    unlikely(!map)) {
++	/* If suspended, queue this IO for later */
++	if (unlikely(test_bit(DMF_BLOCK_IO_FOR_SUSPEND, &md->flags))) {
+ 		if (bio->bi_opf & REQ_NOWAIT)
+ 			bio_wouldblock_error(bio);
+ 		else if (bio->bi_opf & REQ_RAHEAD)
+@@ -2255,7 +2260,7 @@ static int dm_wait_for_bios_completion(struct mapped_device *md, unsigned int ta
+ 			break;
+ 
+ 		if (signal_pending_state(task_state, current)) {
+-			r = -EINTR;
++			r = -ERESTARTSYS;
+ 			break;
+ 		}
+ 
+@@ -2280,7 +2285,7 @@ static int dm_wait_for_completion(struct mapped_device *md, unsigned int task_st
+ 			break;
+ 
+ 		if (signal_pending_state(task_state, current)) {
+-			r = -EINTR;
++			r = -ERESTARTSYS;
+ 			break;
+ 		}
+ 
+@@ -2641,6 +2646,9 @@ static void __dm_internal_suspend(struct mapped_device *md, unsigned suspend_fla
+ 
+ static void __dm_internal_resume(struct mapped_device *md)
+ {
++	int r;
++	struct dm_table *map;
++
+ 	BUG_ON(!md->internal_suspend_count);
+ 
+ 	if (--md->internal_suspend_count)
+@@ -2649,12 +2657,23 @@ static void __dm_internal_resume(struct mapped_device *md)
+ 	if (dm_suspended_md(md))
+ 		goto done; /* resume from nested suspend */
+ 
+-	/*
+-	 * NOTE: existing callers don't need to call dm_table_resume_targets
+-	 * (which may fail -- so best to avoid it for now by passing NULL map)
+-	 */
+-	(void) __dm_resume(md, NULL);
+-
++	map = rcu_dereference_protected(md->map, lockdep_is_held(&md->suspend_lock));
++	r = __dm_resume(md, map);
++	if (r) {
++		/*
++		 * If a preresume method of some target failed, we are in a
++		 * tricky situation. We can't return an error to the caller. We
++		 * can't fake success because then the "resume" and
++		 * "postsuspend" methods would not be paired correctly, and it
++		 * would break various targets, for example it would cause list
++		 * corruption in the "origin" target.
++		 *
++		 * So, we fake normal suspend here, to make sure that the
++		 * "resume" and "postsuspend" methods will be paired correctly.
++		 */
++		DMERR("Preresume method failed: %d", r);
++		set_bit(DMF_SUSPENDED, &md->flags);
++	}
+ done:
+ 	clear_bit(DMF_SUSPENDED_INTERNALLY, &md->flags);
+ 	smp_mb__after_atomic();
+diff --git a/drivers/md/md-bitmap.c b/drivers/md/md-bitmap.c
+index 49c46f3..b26e22d 100644
+--- a/drivers/md/md-bitmap.c
++++ b/drivers/md/md-bitmap.c
+@@ -1355,7 +1355,7 @@ __acquires(bitmap->lock)
+ 	sector_t chunk = offset >> bitmap->chunkshift;
+ 	unsigned long page = chunk >> PAGE_COUNTER_SHIFT;
+ 	unsigned long pageoff = (chunk & PAGE_COUNTER_MASK) << COUNTER_BYTE_SHIFT;
+-	sector_t csize;
++	sector_t csize = ((sector_t)1) << bitmap->chunkshift;
+ 	int err;
+ 
+ 	if (page >= bitmap->pages) {
+@@ -1364,6 +1364,7 @@ __acquires(bitmap->lock)
+ 		 * End-of-device while looking for a whole page or
+ 		 * user set a huge number to sysfs bitmap_set_bits.
+ 		 */
++		*blocks = csize - (offset & (csize - 1));
+ 		return NULL;
+ 	}
+ 	err = md_bitmap_checkpage(bitmap, page, create, 0);
+@@ -1372,8 +1373,7 @@ __acquires(bitmap->lock)
+ 	    bitmap->bp[page].map == NULL)
+ 		csize = ((sector_t)1) << (bitmap->chunkshift +
+ 					  PAGE_COUNTER_SHIFT);
+-	else
+-		csize = ((sector_t)1) << bitmap->chunkshift;
++
+ 	*blocks = csize - (offset & (csize - 1));
+ 
+ 	if (err < 0)
+diff --git a/drivers/md/md.c b/drivers/md/md.c
+index a17f2f7..332458a 100644
+--- a/drivers/md/md.c
++++ b/drivers/md/md.c
+@@ -509,7 +509,6 @@ void mddev_suspend(struct mddev *mddev)
+ 	clear_bit_unlock(MD_ALLOW_SB_UPDATE, &mddev->flags);
+ 	wait_event(mddev->sb_wait, !test_bit(MD_UPDATING_SB, &mddev->flags));
+ 
+-	del_timer_sync(&mddev->safemode_timer);
+ 	/* restrict memory reclaim I/O during raid array is suspend */
+ 	mddev->noio_flag = memalloc_noio_save();
+ }
+@@ -2526,6 +2525,7 @@ static int bind_rdev_to_array(struct md_rdev *rdev, struct mddev *mddev)
+  fail:
+ 	pr_warn("md: failed to register dev-%s for %s\n",
+ 		b, mdname(mddev));
++	mddev_destroy_serial_pool(mddev, rdev, false);
+ 	return err;
+ }
+ 
+@@ -6230,7 +6230,15 @@ static void md_clean(struct mddev *mddev)
+ 	mddev->persistent = 0;
+ 	mddev->level = LEVEL_NONE;
+ 	mddev->clevel[0] = 0;
+-	mddev->flags = 0;
++	/*
++	 * Don't clear MD_CLOSING, or mddev can be opened again.
++	 * 'hold_active != 0' means mddev is still in the creation
++	 * process and will be used later.
++	 */
++	if (mddev->hold_active)
++		mddev->flags = 0;
++	else
++		mddev->flags &= BIT_ULL_MASK(MD_CLOSING);
+ 	mddev->sb_flags = 0;
+ 	mddev->ro = MD_RDWR;
+ 	mddev->metadata_type[0] = 0;
+@@ -7550,7 +7558,6 @@ static int md_ioctl(struct block_device *bdev, fmode_t mode,
+ 	int err = 0;
+ 	void __user *argp = (void __user *)arg;
+ 	struct mddev *mddev = NULL;
+-	bool did_set_md_closing = false;
+ 
+ 	if (!md_ioctl_valid(cmd))
+ 		return -ENOTTY;
+@@ -7582,11 +7589,6 @@ static int md_ioctl(struct block_device *bdev, fmode_t mode,
+ 
+ 	mddev = bdev->bd_disk->private_data;
+ 
+-	if (!mddev) {
+-		BUG();
+-		goto out;
+-	}
+-
+ 	/* Some actions do not requires the mutex */
+ 	switch (cmd) {
+ 	case GET_ARRAY_INFO:
+@@ -7637,7 +7639,6 @@ static int md_ioctl(struct block_device *bdev, fmode_t mode,
+ 			err = -EBUSY;
+ 			goto out;
+ 		}
+-		did_set_md_closing = true;
+ 		mutex_unlock(&mddev->open_mutex);
+ 		sync_blockdev(bdev);
+ 	}
+@@ -7800,7 +7801,7 @@ unlock:
+ 		mddev->hold_active = 0;
+ 	mddev_unlock(mddev);
+ out:
+-	if(did_set_md_closing)
++	if (cmd == STOP_ARRAY_RO || (err && cmd == STOP_ARRAY))
+ 		clear_bit(MD_CLOSING, &mddev->flags);
+ 	return err;
+ }
+diff --git a/drivers/md/persistent-data/dm-array.c b/drivers/md/persistent-data/dm-array.c
+index 3a963d7..1f1dd07 100644
+--- a/drivers/md/persistent-data/dm-array.c
++++ b/drivers/md/persistent-data/dm-array.c
+@@ -911,23 +911,27 @@ static int load_ablock(struct dm_array_cursor *c)
+ 	if (c->block)
+ 		unlock_ablock(c->info, c->block);
+ 
+-	c->block = NULL;
+-	c->ab = NULL;
+ 	c->index = 0;
+ 
+ 	r = dm_btree_cursor_get_value(&c->cursor, &key, &value_le);
+ 	if (r) {
+ 		DMERR("dm_btree_cursor_get_value failed");
+-		dm_btree_cursor_end(&c->cursor);
++		goto out;
+ 
+ 	} else {
+ 		r = get_ablock(c->info, le64_to_cpu(value_le), &c->block, &c->ab);
+ 		if (r) {
+ 			DMERR("get_ablock failed");
+-			dm_btree_cursor_end(&c->cursor);
++			goto out;
+ 		}
+ 	}
+ 
++	return 0;
++
++out:
++	dm_btree_cursor_end(&c->cursor);
++	c->block = NULL;
++	c->ab = NULL;
+ 	return r;
+ }
+ 
+@@ -950,10 +954,10 @@ EXPORT_SYMBOL_GPL(dm_array_cursor_begin);
+ 
+ void dm_array_cursor_end(struct dm_array_cursor *c)
+ {
+-	if (c->block) {
++	if (c->block)
+ 		unlock_ablock(c->info, c->block);
+-		dm_btree_cursor_end(&c->cursor);
+-	}
++
++	dm_btree_cursor_end(&c->cursor);
+ }
+ EXPORT_SYMBOL_GPL(dm_array_cursor_end);
+ 
+@@ -993,6 +997,7 @@ int dm_array_cursor_skip(struct dm_array_cursor *c, uint32_t count)
+ 		}
+ 
+ 		count -= remaining;
++		c->index += (remaining - 1);
+ 		r = dm_array_cursor_next(c);
+ 
+ 	} while (!r);
+diff --git a/drivers/md/persistent-data/dm-space-map-metadata.c b/drivers/md/persistent-data/dm-space-map-metadata.c
+index 392ae26..c8451ff 100644
+--- a/drivers/md/persistent-data/dm-space-map-metadata.c
++++ b/drivers/md/persistent-data/dm-space-map-metadata.c
+@@ -274,7 +274,7 @@ static void sm_metadata_destroy(struct dm_space_map *sm)
+ {
+ 	struct sm_metadata *smm = container_of(sm, struct sm_metadata, sm);
+ 
+-	kfree(smm);
++	kvfree(smm);
+ }
+ 
+ static int sm_metadata_get_nr_blocks(struct dm_space_map *sm, dm_block_t *count)
+@@ -768,7 +768,7 @@ struct dm_space_map *dm_sm_metadata_init(void)
+ {
+ 	struct sm_metadata *smm;
+ 
+-	smm = kmalloc(sizeof(*smm), GFP_KERNEL);
++	smm = kvmalloc(sizeof(*smm), GFP_KERNEL);
+ 	if (!smm)
+ 		return ERR_PTR(-ENOMEM);
+ 
+diff --git a/drivers/md/raid10.c b/drivers/md/raid10.c
+index ae84aaa..bdd5a56 100644
+--- a/drivers/md/raid10.c
++++ b/drivers/md/raid10.c
+@@ -3443,7 +3443,6 @@ static sector_t raid10_sync_request(struct mddev *mddev, sector_t sector_nr,
+ 			sector_t sect;
+ 			int must_sync;
+ 			int any_working;
+-			int need_recover = 0;
+ 			struct raid10_info *mirror = &conf->mirrors[i];
+ 			struct md_rdev *mrdev, *mreplace;
+ 
+@@ -3451,14 +3450,13 @@ static sector_t raid10_sync_request(struct mddev *mddev, sector_t sector_nr,
+ 			mrdev = rcu_dereference(mirror->rdev);
+ 			mreplace = rcu_dereference(mirror->replacement);
+ 
+-			if (mrdev != NULL &&
+-			    !test_bit(Faulty, &mrdev->flags) &&
+-			    !test_bit(In_sync, &mrdev->flags))
+-				need_recover = 1;
++			if (mrdev && (test_bit(Faulty, &mrdev->flags) ||
++			    test_bit(In_sync, &mrdev->flags)))
++				mrdev = NULL;
+ 			if (mreplace && test_bit(Faulty, &mreplace->flags))
+ 				mreplace = NULL;
+ 
+-			if (!need_recover && !mreplace) {
++			if (!mrdev && !mreplace) {
+ 				rcu_read_unlock();
+ 				continue;
+ 			}
+@@ -3492,7 +3490,8 @@ static sector_t raid10_sync_request(struct mddev *mddev, sector_t sector_nr,
+ 				rcu_read_unlock();
+ 				continue;
+ 			}
+-			atomic_inc(&mrdev->nr_pending);
++			if (mrdev)
++				atomic_inc(&mrdev->nr_pending);
+ 			if (mreplace)
+ 				atomic_inc(&mreplace->nr_pending);
+ 			rcu_read_unlock();
+@@ -3579,7 +3578,7 @@ static sector_t raid10_sync_request(struct mddev *mddev, sector_t sector_nr,
+ 				r10_bio->devs[1].devnum = i;
+ 				r10_bio->devs[1].addr = to_addr;
+ 
+-				if (need_recover) {
++				if (mrdev) {
+ 					bio = r10_bio->devs[1].bio;
+ 					bio->bi_next = biolist;
+ 					biolist = bio;
+@@ -3624,7 +3623,7 @@ static sector_t raid10_sync_request(struct mddev *mddev, sector_t sector_nr,
+ 					for (k = 0; k < conf->copies; k++)
+ 						if (r10_bio->devs[k].devnum == i)
+ 							break;
+-					if (!test_bit(In_sync,
++					if (mrdev && !test_bit(In_sync,
+ 						      &mrdev->flags)
+ 					    && !rdev_set_badblocks(
+ 						    mrdev,
+@@ -3650,12 +3649,14 @@ static sector_t raid10_sync_request(struct mddev *mddev, sector_t sector_nr,
+ 				if (rb2)
+ 					atomic_dec(&rb2->remaining);
+ 				r10_bio = rb2;
+-				rdev_dec_pending(mrdev, mddev);
++				if (mrdev)
++					rdev_dec_pending(mrdev, mddev);
+ 				if (mreplace)
+ 					rdev_dec_pending(mreplace, mddev);
+ 				break;
+ 			}
+-			rdev_dec_pending(mrdev, mddev);
++			if (mrdev)
++				rdev_dec_pending(mrdev, mddev);
+ 			if (mreplace)
+ 				rdev_dec_pending(mreplace, mddev);
+ 			if (r10_bio->devs[0].bio->bi_opf & MD_FAILFAST) {
+diff --git a/drivers/md/raid5.c b/drivers/md/raid5.c
+index c2a4248..6ec9bd7 100644
+--- a/drivers/md/raid5.c
++++ b/drivers/md/raid5.c
+@@ -36,7 +36,6 @@
+  */
+ 
+ #include <linux/blkdev.h>
+-#include <linux/delay.h>
+ #include <linux/kthread.h>
+ #include <linux/raid/pq.h>
+ #include <linux/async_tx.h>
+@@ -2350,7 +2349,7 @@ static int grow_one_stripe(struct r5conf *conf, gfp_t gfp)
+ 	atomic_inc(&conf->active_stripes);
+ 
+ 	raid5_release_stripe(sh);
+-	conf->max_nr_stripes++;
++	WRITE_ONCE(conf->max_nr_stripes, conf->max_nr_stripes + 1);
+ 	return 1;
+ }
+ 
+@@ -2647,7 +2646,7 @@ static int drop_one_stripe(struct r5conf *conf)
+ 	shrink_buffers(sh);
+ 	free_stripe(conf->slab_cache, sh);
+ 	atomic_dec(&conf->active_stripes);
+-	conf->max_nr_stripes--;
++	WRITE_ONCE(conf->max_nr_stripes, conf->max_nr_stripes - 1);
+ 	return 1;
+ }
+ 
+@@ -6008,7 +6007,9 @@ static sector_t reshape_request(struct mddev *mddev, sector_t sector_nr, int *sk
+ 	safepos = conf->reshape_safe;
+ 	sector_div(safepos, data_disks);
+ 	if (mddev->reshape_backwards) {
+-		BUG_ON(writepos < reshape_sectors);
++		if (WARN_ON(writepos < reshape_sectors))
++			return MaxSector;
++
+ 		writepos -= reshape_sectors;
+ 		readpos += reshape_sectors;
+ 		safepos += reshape_sectors;
+@@ -6026,14 +6027,18 @@ static sector_t reshape_request(struct mddev *mddev, sector_t sector_nr, int *sk
+ 	 * to set 'stripe_addr' which is where we will write to.
+ 	 */
+ 	if (mddev->reshape_backwards) {
+-		BUG_ON(conf->reshape_progress == 0);
++		if (WARN_ON(conf->reshape_progress == 0))
++			return MaxSector;
++
+ 		stripe_addr = writepos;
+-		BUG_ON((mddev->dev_sectors &
+-			~((sector_t)reshape_sectors - 1))
+-		       - reshape_sectors - stripe_addr
+-		       != sector_nr);
++		if (WARN_ON((mddev->dev_sectors &
++		    ~((sector_t)reshape_sectors - 1)) -
++		    reshape_sectors - stripe_addr != sector_nr))
++			return MaxSector;
+ 	} else {
+-		BUG_ON(writepos != sector_nr + reshape_sectors);
++		if (WARN_ON(writepos != sector_nr + reshape_sectors))
++			return MaxSector;
++
+ 		stripe_addr = sector_nr;
+ 	}
+ 
+@@ -6486,6 +6491,9 @@ static void raid5d(struct md_thread *thread)
+ 		int batch_size, released;
+ 		unsigned int offset;
+ 
++		if (test_bit(MD_SB_CHANGE_PENDING, &mddev->sb_flags))
++			break;
++
+ 		released = release_stripe_list(conf, conf->temp_inactive_list);
+ 		if (released)
+ 			clear_bit(R5_DID_ALLOC, &conf->cache_state);
+@@ -6522,18 +6530,7 @@ static void raid5d(struct md_thread *thread)
+ 			spin_unlock_irq(&conf->device_lock);
+ 			md_check_recovery(mddev);
+ 			spin_lock_irq(&conf->device_lock);
+-
+-			/*
+-			 * Waiting on MD_SB_CHANGE_PENDING below may deadlock
+-			 * seeing md_check_recovery() is needed to clear
+-			 * the flag when using mdmon.
+-			 */
+-			continue;
+ 		}
+-
+-		wait_event_lock_irq(mddev->sb_wait,
+-			!test_bit(MD_SB_CHANGE_PENDING, &mddev->sb_flags),
+-			conf->device_lock);
+ 	}
+ 	pr_debug("%d stripes handled\n", handled);
+ 
+@@ -6580,7 +6577,7 @@ raid5_set_cache_size(struct mddev *mddev, int size)
+ 	if (size <= 16 || size > 32768)
+ 		return -EINVAL;
+ 
+-	conf->min_nr_stripes = size;
++	WRITE_ONCE(conf->min_nr_stripes, size);
+ 	mutex_lock(&conf->cache_size_mutex);
+ 	while (size < conf->max_nr_stripes &&
+ 	       drop_one_stripe(conf))
+@@ -6592,7 +6589,7 @@ raid5_set_cache_size(struct mddev *mddev, int size)
+ 	mutex_lock(&conf->cache_size_mutex);
+ 	while (size > conf->max_nr_stripes)
+ 		if (!grow_one_stripe(conf, GFP_KERNEL)) {
+-			conf->min_nr_stripes = conf->max_nr_stripes;
++			WRITE_ONCE(conf->min_nr_stripes, conf->max_nr_stripes);
+ 			result = -ENOMEM;
+ 			break;
+ 		}
+@@ -7156,11 +7153,13 @@ static unsigned long raid5_cache_count(struct shrinker *shrink,
+ 				       struct shrink_control *sc)
+ {
+ 	struct r5conf *conf = container_of(shrink, struct r5conf, shrinker);
++	int max_stripes = READ_ONCE(conf->max_nr_stripes);
++	int min_stripes = READ_ONCE(conf->min_nr_stripes);
+ 
+-	if (conf->max_nr_stripes < conf->min_nr_stripes)
++	if (max_stripes < min_stripes)
+ 		/* unlikely, but not impossible */
+ 		return 0;
+-	return conf->max_nr_stripes - conf->min_nr_stripes;
++	return max_stripes - min_stripes;
+ }
+ 
+ static struct r5conf *setup_conf(struct mddev *mddev)

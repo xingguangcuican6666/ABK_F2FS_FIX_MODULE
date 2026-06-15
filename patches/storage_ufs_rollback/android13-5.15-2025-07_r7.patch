@@ -1,0 +1,286 @@
+diff --git a/drivers/scsi/ufs/cdns-pltfrm.c b/drivers/scsi/ufs/cdns-pltfrm.c
+index 7da8be2..07a2580 100644
+--- a/drivers/scsi/ufs/cdns-pltfrm.c
++++ b/drivers/scsi/ufs/cdns-pltfrm.c
+@@ -136,7 +136,7 @@ static int cdns_ufs_set_hclkdiv(struct ufs_hba *hba)
+ 	 * Make sure the register was updated,
+ 	 * UniPro layer will not work with an incorrect value.
+ 	 */
+-	mb();
++	ufshcd_readl(hba, CDNS_UFS_REG_HCLKDIV);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/scsi/ufs/ufs-exynos.c b/drivers/scsi/ufs/ufs-exynos.c
+index 30d0c1a..5bc1543 100644
+--- a/drivers/scsi/ufs/ufs-exynos.c
++++ b/drivers/scsi/ufs/ufs-exynos.c
+@@ -1038,12 +1038,12 @@ static void exynos_ufs_dev_hw_reset(struct ufs_hba *hba)
+ 	hci_writel(ufs, 1 << 0, HCI_GPIO_OUT);
+ }
+ 
+-static void exynos_ufs_pre_hibern8(struct ufs_hba *hba, u8 enter)
++static void exynos_ufs_pre_hibern8(struct ufs_hba *hba, enum uic_cmd_dme cmd)
+ {
+ 	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
+ 	struct exynos_ufs_uic_attr *attr = ufs->drv_data->uic_attr;
+ 
+-	if (!enter) {
++	if (cmd == UIC_CMD_DME_HIBER_EXIT) {
+ 		if (ufs->opts & EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL)
+ 			exynos_ufs_disable_auto_ctrl_hcc(ufs);
+ 		exynos_ufs_ungate_clks(ufs);
+@@ -1071,11 +1071,11 @@ static void exynos_ufs_pre_hibern8(struct ufs_hba *hba, u8 enter)
+ 	}
+ }
+ 
+-static void exynos_ufs_post_hibern8(struct ufs_hba *hba, u8 enter)
++static void exynos_ufs_post_hibern8(struct ufs_hba *hba, enum uic_cmd_dme cmd)
+ {
+ 	struct exynos_ufs *ufs = ufshcd_get_variant(hba);
+ 
+-	if (!enter) {
++	if (cmd == UIC_CMD_DME_HIBER_EXIT) {
+ 		u32 cur_mode = 0;
+ 		u32 pwrmode;
+ 
+@@ -1094,7 +1094,7 @@ static void exynos_ufs_post_hibern8(struct ufs_hba *hba, u8 enter)
+ 
+ 		if (!(ufs->opts & EXYNOS_UFS_OPT_SKIP_CONNECTION_ESTAB))
+ 			exynos_ufs_establish_connt(ufs);
+-	} else {
++	} else if (cmd == UIC_CMD_DME_HIBER_ENTER) {
+ 		ufs->entry_hibern8_t = ktime_get();
+ 		exynos_ufs_gate_clks(ufs);
+ 		if (ufs->opts & EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL)
+@@ -1163,15 +1163,15 @@ static int exynos_ufs_pwr_change_notify(struct ufs_hba *hba,
+ }
+ 
+ static void exynos_ufs_hibern8_notify(struct ufs_hba *hba,
+-				     enum uic_cmd_dme enter,
++				     enum uic_cmd_dme cmd,
+ 				     enum ufs_notify_change_status notify)
+ {
+ 	switch ((u8)notify) {
+ 	case PRE_CHANGE:
+-		exynos_ufs_pre_hibern8(hba, enter);
++		exynos_ufs_pre_hibern8(hba, cmd);
+ 		break;
+ 	case POST_CHANGE:
+-		exynos_ufs_post_hibern8(hba, enter);
++		exynos_ufs_post_hibern8(hba, cmd);
+ 		break;
+ 	}
+ }
+diff --git a/drivers/scsi/ufs/ufs-qcom.c b/drivers/scsi/ufs/ufs-qcom.c
+index 08c7938..ee390f7 100644
+--- a/drivers/scsi/ufs/ufs-qcom.c
++++ b/drivers/scsi/ufs/ufs-qcom.c
+@@ -242,8 +242,9 @@ static void ufs_qcom_select_unipro_mode(struct ufs_qcom_host *host)
+ 	ufshcd_rmwl(host->hba, QUNIPRO_SEL,
+ 		   ufs_qcom_cap_qunipro(host) ? QUNIPRO_SEL : 0,
+ 		   REG_UFS_CFG1);
+-	/* make sure above configuration is applied before we return */
+-	mb();
++
++	if (host->hw_ver.major >= 0x05)
++		ufshcd_rmwl(host->hba, QUNIPRO_G4_SEL, 0, REG_UFS_CFG0);
+ }
+ 
+ /*
+@@ -352,7 +353,7 @@ static void ufs_qcom_enable_hw_clk_gating(struct ufs_hba *hba)
+ 		REG_UFS_CFG2);
+ 
+ 	/* Ensure that HW clock gating is enabled before next operations */
+-	mb();
++	ufshcd_readl(hba, REG_UFS_CFG2);
+ }
+ 
+ static int ufs_qcom_hce_enable_notify(struct ufs_hba *hba,
+@@ -449,7 +450,7 @@ static int ufs_qcom_cfg_timers(struct ufs_hba *hba, u32 gear,
+ 		 * make sure above write gets applied before we return from
+ 		 * this function.
+ 		 */
+-		mb();
++		ufshcd_readl(hba, REG_UFS_SYS1CLK_1US);
+ 	}
+ 
+ 	if (ufs_qcom_cap_qunipro(host))
+@@ -515,9 +516,9 @@ static int ufs_qcom_cfg_timers(struct ufs_hba *hba, u32 gear,
+ 		mb();
+ 	}
+ 
+-	if (update_link_startup_timer) {
++	if (update_link_startup_timer && host->hw_ver.major != 0x5) {
+ 		ufshcd_writel(hba, ((core_clk_rate / MSEC_PER_SEC) * 100),
+-			      REG_UFS_PA_LINK_STARTUP_TIMER);
++			      REG_UFS_CFG0);
+ 		/*
+ 		 * make sure that this configuration is applied before
+ 		 * we return
+diff --git a/drivers/scsi/ufs/ufs-qcom.h b/drivers/scsi/ufs/ufs-qcom.h
+index 8208e3a..6b45848 100644
+--- a/drivers/scsi/ufs/ufs-qcom.h
++++ b/drivers/scsi/ufs/ufs-qcom.h
+@@ -35,8 +35,10 @@ enum {
+ 	REG_UFS_TX_SYMBOL_CLK_NS_US         = 0xC4,
+ 	REG_UFS_LOCAL_PORT_ID_REG           = 0xC8,
+ 	REG_UFS_PA_ERR_CODE                 = 0xCC,
+-	REG_UFS_RETRY_TIMER_REG             = 0xD0,
+-	REG_UFS_PA_LINK_STARTUP_TIMER       = 0xD8,
++	/* On older UFS revisions, this register is called "RETRY_TIMER_REG" */
++	REG_UFS_PARAM0                      = 0xD0,
++	/* On older UFS revisions, this register is called "REG_UFS_PA_LINK_STARTUP_TIMER" */
++	REG_UFS_CFG0                        = 0xD8,
+ 	REG_UFS_CFG1                        = 0xDC,
+ 	REG_UFS_CFG2                        = 0xE0,
+ 	REG_UFS_HW_VERSION                  = 0xE4,
+@@ -74,6 +76,9 @@ enum {
+ #define UFS_CNTLR_2_x_x_VEN_REGS_OFFSET(x)	(0x000 + x)
+ #define UFS_CNTLR_3_x_x_VEN_REGS_OFFSET(x)	(0x400 + x)
+ 
++/* bit definitions for REG_UFS_CFG0 register */
++#define QUNIPRO_G4_SEL		BIT(5)
++
+ /* bit definitions for REG_UFS_CFG1 register */
+ #define QUNIPRO_SEL		0x1
+ #define UTP_DBG_RAMS_EN		0x20000
+@@ -145,10 +150,10 @@ static inline void ufs_qcom_assert_reset(struct ufs_hba *hba)
+ 			1 << OFFSET_UFS_PHY_SOFT_RESET, REG_UFS_CFG1);
+ 
+ 	/*
+-	 * Make sure assertion of ufs phy reset is written to
+-	 * register before returning
++	 * Dummy read to ensure the write takes effect before doing any sort
++	 * of delay
+ 	 */
+-	mb();
++	ufshcd_readl(hba, REG_UFS_CFG1);
+ }
+ 
+ static inline void ufs_qcom_deassert_reset(struct ufs_hba *hba)
+@@ -157,10 +162,10 @@ static inline void ufs_qcom_deassert_reset(struct ufs_hba *hba)
+ 			0 << OFFSET_UFS_PHY_SOFT_RESET, REG_UFS_CFG1);
+ 
+ 	/*
+-	 * Make sure de-assertion of ufs phy reset is written to
+-	 * register before returning
++	 * Dummy read to ensure the write takes effect before doing any sort
++	 * of delay
+ 	 */
+-	mb();
++	ufshcd_readl(hba, REG_UFS_CFG1);
+ }
+ 
+ /* Host controller hardware version: major.minor.step */
+diff --git a/drivers/scsi/ufs/ufs-sysfs.c b/drivers/scsi/ufs/ufs-sysfs.c
+index 77489f8..9afb97c 100644
+--- a/drivers/scsi/ufs/ufs-sysfs.c
++++ b/drivers/scsi/ufs/ufs-sysfs.c
+@@ -374,6 +374,9 @@ static ssize_t read_req_latency_avg_show(struct device *dev,
+ 	struct ufs_hba *hba = dev_get_drvdata(dev);
+ 	struct ufs_hba_monitor *m = &hba->monitor;
+ 
++	if (!m->nr_req[READ])
++		return sysfs_emit(buf, "0\n");
++
+ 	return sysfs_emit(buf, "%llu\n", div_u64(ktime_to_us(m->lat_sum[READ]),
+ 						 m->nr_req[READ]));
+ }
+@@ -441,6 +444,9 @@ static ssize_t write_req_latency_avg_show(struct device *dev,
+ 	struct ufs_hba *hba = dev_get_drvdata(dev);
+ 	struct ufs_hba_monitor *m = &hba->monitor;
+ 
++	if (!m->nr_req[WRITE])
++		return sysfs_emit(buf, "0\n");
++
+ 	return sysfs_emit(buf, "%llu\n", div_u64(ktime_to_us(m->lat_sum[WRITE]),
+ 						 m->nr_req[WRITE]));
+ }
+diff --git a/drivers/scsi/ufs/ufs.h b/drivers/scsi/ufs/ufs.h
+index 3f4ef22..e57819f 100644
+--- a/drivers/scsi/ufs/ufs.h
++++ b/drivers/scsi/ufs/ufs.h
+@@ -343,8 +343,8 @@ enum {
+ 
+ /* Possible values for dExtendedUFSFeaturesSupport */
+ enum {
+-	UFS_DEV_LOW_TEMP_NOTIF		= BIT(4),
+-	UFS_DEV_HIGH_TEMP_NOTIF		= BIT(5),
++	UFS_DEV_HIGH_TEMP_NOTIF		= BIT(4),
++	UFS_DEV_LOW_TEMP_NOTIF		= BIT(5),
+ 	UFS_DEV_EXT_TEMP_NOTIF		= BIT(6),
+ 	UFS_DEV_HPB_SUPPORT		= BIT(7),
+ 	UFS_DEV_WRITE_BOOSTER_SUP	= BIT(8),
+diff --git a/drivers/scsi/ufs/ufs_bsg.c b/drivers/scsi/ufs/ufs_bsg.c
+index 39bf204..b8bbfd8 100644
+--- a/drivers/scsi/ufs/ufs_bsg.c
++++ b/drivers/scsi/ufs/ufs_bsg.c
+@@ -175,6 +175,7 @@ void ufs_bsg_remove(struct ufs_hba *hba)
+ 		return;
+ 
+ 	bsg_remove_queue(hba->bsg_queue);
++	hba->bsg_queue = NULL;
+ 
+ 	device_del(bsg_dev);
+ 	put_device(bsg_dev);
+@@ -213,6 +214,7 @@ int ufs_bsg_probe(struct ufs_hba *hba)
+ 	q = bsg_setup_queue(bsg_dev, dev_name(bsg_dev), ufs_bsg_request, NULL, 0);
+ 	if (IS_ERR(q)) {
+ 		ret = PTR_ERR(q);
++		device_del(bsg_dev);
+ 		goto out;
+ 	}
+ 
+diff --git a/drivers/scsi/ufs/ufshcd.c b/drivers/scsi/ufs/ufshcd.c
+index 01186ae..2c6fae9 100644
+--- a/drivers/scsi/ufs/ufshcd.c
++++ b/drivers/scsi/ufs/ufshcd.c
+@@ -3894,11 +3894,16 @@ static inline void ufshcd_add_delay_before_dme_cmd(struct ufs_hba *hba)
+ 			min_sleep_time_us =
+ 				MIN_DELAY_BEFORE_DME_CMDS_US - delta;
+ 		else
+-			return; /* no more delay required */
++			min_sleep_time_us = 0; /* no more delay required */
+ 	}
+ 
+-	/* allow sleep for extra 50us if needed */
+-	usleep_range(min_sleep_time_us, min_sleep_time_us + 50);
++	if (min_sleep_time_us > 0) {
++		/* allow sleep for extra 50us if needed */
++		usleep_range(min_sleep_time_us, min_sleep_time_us + 50);
++	}
++
++	/* update the last_dme_cmd_tstamp */
++	hba->last_dme_cmd_tstamp = ktime_get();
+ }
+ 
+ /**
+@@ -4059,7 +4064,7 @@ static int ufshcd_uic_pwr_ctrl(struct ufs_hba *hba, struct uic_command *cmd)
+ 		 * Make sure UIC command completion interrupt is disabled before
+ 		 * issuing UIC command.
+ 		 */
+-		wmb();
++		ufshcd_readl(hba, REG_INTERRUPT_ENABLE);
+ 		reenable_intr = true;
+ 	}
+ 	spin_unlock_irqrestore(hba->host->host_lock, flags);
+@@ -9555,9 +9560,6 @@ int ufshcd_system_restore(struct device *dev)
+ 	 */
+ 	ufshcd_readl(hba, REG_UTP_TASK_REQ_LIST_BASE_H);
+ 
+-	/* Resuming from hibernate, assume that link was OFF */
+-	ufshcd_set_link_off(hba);
+-
+ 	return 0;
+ 
+ }
+@@ -9771,7 +9773,7 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
+ 	 * Make sure that UFS interrupts are disabled and any pending interrupt
+ 	 * status is cleared before registering UFS interrupt handler.
+ 	 */
+-	mb();
++	ufshcd_readl(hba, REG_INTERRUPT_ENABLE);
+ 
+ 	/* IRQ registration */
+ 	err = devm_request_irq(dev, irq, ufshcd_intr, IRQF_SHARED, UFSHCD, hba);

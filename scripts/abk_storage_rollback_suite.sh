@@ -1,12 +1,70 @@
 #!/usr/bin/env bash
 
 ABK_STORAGE_ROLLBACK_RESOLVED_TARGET_TAG=""
+ABK_STORAGE_ROLLBACK_RESOLVED_KERNEL_BRANCH=""
 
 abk_storage_rollback_common_dir() {
-  abk_common_dir
+  local common_dir root_dir
+
+  root_dir="$KERNEL_ROOT"
+  common_dir="$root_dir/common"
+
+  if [ -d "$common_dir" ]; then
+    printf '%s\n' "$common_dir"
+    return 0
+  fi
+
+  printf '%s\n' "$root_dir"
 }
 
-abk_storage_rollback_resolve_target_tag_from_os_patch_level() {
+abk_storage_rollback_kernel_version_key() {
+  local version patchlevel
+
+  version="$(abk_kernel_make_value VERSION)"
+  patchlevel="$(abk_kernel_make_value PATCHLEVEL)"
+  printf '%s.%s\n' "$version" "$patchlevel"
+}
+
+abk_storage_rollback_kernel_branch() {
+  local key
+
+  if [ -n "$ABK_STORAGE_ROLLBACK_RESOLVED_KERNEL_BRANCH" ]; then
+    printf '%s\n' "$ABK_STORAGE_ROLLBACK_RESOLVED_KERNEL_BRANCH"
+    return 0
+  fi
+
+  key="$(abk_storage_rollback_kernel_version_key)"
+  case "$key" in
+    5.15)
+      ABK_STORAGE_ROLLBACK_RESOLVED_KERNEL_BRANCH='android13-5.15'
+      ;;
+    6.1)
+      ABK_STORAGE_ROLLBACK_RESOLVED_KERNEL_BRANCH='android14-6.1'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  printf '%s\n' "$ABK_STORAGE_ROLLBACK_RESOLVED_KERNEL_BRANCH"
+}
+
+abk_storage_rollback_resolve_target_tag_from_os_patch_level_5_15() {
+  case "${ABK_BUILD_OS_PATCH_LEVEL:-}" in
+    2024-09) printf '%s\n' 'android13-5.15-2024-09_r8' ;;
+    2024-11) printf '%s\n' 'android13-5.15-2024-11_r14' ;;
+    2025-01) printf '%s\n' 'android13-5.15-2025-01_r7' ;;
+    2025-03) printf '%s\n' 'android13-5.15-2025-03_r13' ;;
+    2025-05) printf '%s\n' 'android13-5.15-2025-05_r15' ;;
+    2025-07) printf '%s\n' 'android13-5.15-2025-07_r7' ;;
+    2025-09) printf '%s\n' 'android13-5.15-2025-09_r12' ;;
+    2025-12) printf '%s\n' 'android13-5.15-2025-12_r9' ;;
+    2026-03) printf '%s\n' 'android13-5.15-2026-03_r12' ;;
+    *) return 1 ;;
+  esac
+}
+
+abk_storage_rollback_resolve_target_tag_from_os_patch_level_6_1() {
   case "${ABK_BUILD_OS_PATCH_LEVEL:-}" in
     2024-09) printf '%s\n' 'android14-6.1-2024-09_r14' ;;
     2024-10) printf '%s\n' 'android14-6.1-2024-10_r26' ;;
@@ -27,9 +85,34 @@ abk_storage_rollback_resolve_target_tag_from_os_patch_level() {
   esac
 }
 
-abk_storage_rollback_resolve_target_tag_from_sublevel() {
-  local sublevel="${1:-}"
-  case "$sublevel" in
+abk_storage_rollback_resolve_target_tag_from_os_patch_level() {
+  local kernel_branch
+
+  kernel_branch="$(abk_storage_rollback_kernel_branch)" || return 1
+  case "$kernel_branch" in
+    android13-5.15) abk_storage_rollback_resolve_target_tag_from_os_patch_level_5_15 ;;
+    android14-6.1) abk_storage_rollback_resolve_target_tag_from_os_patch_level_6_1 ;;
+    *) return 1 ;;
+  esac
+}
+
+abk_storage_rollback_resolve_target_tag_from_sublevel_5_15() {
+  case "$1" in
+    153) printf '%s\n' 'android13-5.15-2024-09_r8' ;;
+    167) printf '%s\n' 'android13-5.15-2024-11_r14' ;;
+    170) printf '%s\n' 'android13-5.15-2025-01_r7' ;;
+    178) printf '%s\n' 'android13-5.15-2025-03_r13' ;;
+    180) printf '%s\n' 'android13-5.15-2025-05_r15' ;;
+    185) printf '%s\n' 'android13-5.15-2025-07_r7' ;;
+    189) printf '%s\n' 'android13-5.15-2025-09_r12' ;;
+    194) printf '%s\n' 'android13-5.15-2025-12_r9' ;;
+    197) printf '%s\n' 'android13-5.15-2026-03_r12' ;;
+    *) return 1 ;;
+  esac
+}
+
+abk_storage_rollback_resolve_target_tag_from_sublevel_6_1() {
+  case "$1" in
     9[3-8]) printf '%s\n' 'android14-6.1-2024-09_r14' ;;
     99|10[0-9]|11[01]) printf '%s\n' 'android14-6.1-2024-10_r26' ;;
     11[2-4]) printf '%s\n' 'android14-6.1-2024-11_r14' ;;
@@ -44,6 +127,18 @@ abk_storage_rollback_resolve_target_tag_from_sublevel() {
     14[5-6]) printf '%s\n' 'android14-6.1-2025-09_r32' ;;
     15[7-9]|160|161) printf '%s\n' 'android14-6.1-2025-12_r22' ;;
     162) printf '%s\n' 'android14-6.1-2026-03_r15' ;;
+    *) return 1 ;;
+  esac
+}
+
+abk_storage_rollback_resolve_target_tag_from_sublevel() {
+  local sublevel="${1:-}"
+  local kernel_branch
+
+  kernel_branch="$(abk_storage_rollback_kernel_branch)" || return 1
+  case "$kernel_branch" in
+    android13-5.15) abk_storage_rollback_resolve_target_tag_from_sublevel_5_15 "$sublevel" ;;
+    android14-6.1) abk_storage_rollback_resolve_target_tag_from_sublevel_6_1 "$sublevel" ;;
     *) return 1 ;;
   esac
 }
@@ -69,7 +164,7 @@ abk_storage_rollback_resolve_target_tag() {
     return 0
   fi
 
-  abk_die "unsupported Android 14 / Linux 6.1 target for storage rollback: os_patch_level=${ABK_BUILD_OS_PATCH_LEVEL:-unknown}, sublevel=${sublevel:-unknown}"
+  abk_die "unsupported storage rollback target for kernel=${ABK_STORAGE_ROLLBACK_RESOLVED_KERNEL_BRANCH:-unknown}: os_patch_level=${ABK_BUILD_OS_PATCH_LEVEL:-unknown}, sublevel=${sublevel:-unknown}"
 }
 
 abk_storage_rollback_patch_file() {
@@ -91,6 +186,21 @@ abk_storage_rollback_patch() {
   abk_require_dir "$common_dir"
 
   patch_file="$(abk_storage_rollback_patch_file "$patch_subdir")"
+  abk_apply_reverse_patch "$patch_file" "$common_dir"
+}
+
+abk_storage_rollback_optional_patch() {
+  local patch_subdir="$1"
+  local common_dir patch_file
+
+  common_dir="$(abk_storage_rollback_common_dir)"
+  abk_require_dir "$common_dir"
+
+  patch_file="$MODULE_DIR/patches/$patch_subdir/$(abk_storage_rollback_resolve_target_tag).patch"
+  if [ ! -f "$patch_file" ]; then
+    return 1
+  fi
+
   abk_apply_reverse_patch "$patch_file" "$common_dir"
 }
 
@@ -117,13 +227,13 @@ abk_storage_rollback_f2fs_patch() {
 
   (
     cd "$common_dir" || exit
-    if git apply --reverse --check "$patch_file" >/dev/null 2>&1; then
-      git apply --reverse "$patch_file"
+    if git apply --reverse --check --allow-empty "$patch_file" >/dev/null 2>&1; then
+      git apply --reverse --allow-empty "$patch_file"
       abk_log "applied rollback patch: $patch_file"
       exit 0
     fi
 
-    if git apply --check "$patch_file" >/dev/null 2>&1; then
+    if git apply --check --allow-empty "$patch_file" >/dev/null 2>&1; then
       abk_log "rollback patch already applied: $patch_file"
       exit 0
     fi
@@ -263,9 +373,23 @@ abk_storage_rollback_apply_child() {
 
   case "$child_id" in
     storage_ufs_rollback)
+      local common_dir ufs_dir
+
       abk_log "apply child: $child_id"
-      abk_require_dir "$(abk_storage_rollback_common_dir)/drivers/ufs"
-      abk_storage_rollback_patch "storage_ufs_rollback"
+      common_dir="$(abk_storage_rollback_common_dir)"
+      case "$(abk_storage_rollback_kernel_branch)" in
+        android13-5.15) ufs_dir="$common_dir/drivers/scsi/ufs" ;;
+        android14-6.1) ufs_dir="$common_dir/drivers/ufs" ;;
+        *) abk_die "unsupported kernel branch for UFS rollback" ;;
+      esac
+      abk_require_dir "$ufs_dir"
+      if ! abk_storage_rollback_optional_patch "storage_ufs_rollback"; then
+        if [ "$(abk_storage_rollback_kernel_branch)" = "android13-5.15" ]; then
+          abk_log "no UFS rollback patch for $(abk_storage_rollback_resolve_target_tag); skipping"
+          return 0
+        fi
+        abk_die "rollback patch does not match current kernel tree: $(abk_storage_rollback_resolve_target_tag)"
+      fi
       ;;
     storage_block_rollback)
       abk_log "apply child: $child_id"
